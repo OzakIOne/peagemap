@@ -1,11 +1,17 @@
 import { buildCumulativeDistancesKm, projectPointToRoute } from "~/domain/geo";
-import type { MatchedTollUnit, PlaceSuggestion, RouteGeometry } from "~/domain/toll-types";
+import type {
+  BypassDetour,
+  MatchedTollUnit,
+  PlaceSuggestion,
+  PricedTollSection,
+  RouteGeometry,
+} from "~/domain/toll-types";
 
 export interface ExportWaypoint {
   name: string;
   lat: number;
   lon: number;
-  kind: "stop" | "split";
+  kind: "stop" | "split" | "bypass";
 }
 
 export interface RouteExportInput {
@@ -14,6 +20,8 @@ export interface RouteExportInput {
   stops: PlaceSuggestion[];
   route: RouteGeometry;
   units: MatchedTollUnit[];
+  sections?: PricedTollSection[];
+  bypassDetours?: Readonly<Record<string, BypassDetour>>;
   splitPlazaIds: ReadonlySet<string>;
   avoidTolls: boolean;
 }
@@ -80,6 +88,22 @@ export const collectOrderedExportWaypoints = (input: RouteExportInput): ExportWa
         distanceAlongRouteKm: matched.distanceAlongRouteKm,
       });
     }
+  }
+
+  for (const section of input.sections ?? []) {
+    if (!section.isBypassed) continue;
+    const detour = input.bypassDetours?.[section.id];
+    const midCoord = detour?.coordinates[Math.floor(detour.coordinates.length / 2)];
+    if (!midCoord) continue;
+    const midDistanceKm =
+      (section.fromPlaza.distanceAlongRouteKm + section.toPlaza.distanceAlongRouteKm) / 2;
+    items.push({
+      name: `Contournement ${section.fromPlaza.plaza.name} → ${section.toPlaza.plaza.name}`,
+      lat: midCoord[1],
+      lon: midCoord[0],
+      kind: "bypass",
+      distanceAlongRouteKm: midDistanceKm,
+    });
   }
 
   items.sort((a, b) => a.distanceAlongRouteKm - b.distanceAlongRouteKm);
@@ -156,6 +180,44 @@ export const buildGpxFilename = (params: {
   destinationLabel: string;
 }): string => `peagemap-${slugify(params.originLabel)}-${slugify(params.destinationLabel)}.gpx`;
 
+const buildStitchedTrackCoordinates = (input: RouteExportInput): Array<[number, number]> => {
+  if (input.avoidTolls || !input.sections || !input.bypassDetours) {
+    return input.route.coordinates;
+  }
+
+  const activeBypassSpans = input.sections
+    .filter((section) => section.isBypassed && Boolean(input.bypassDetours?.[section.id]))
+    .map((section) => ({
+      startIdx: section.fromPlaza.routeCoordIndex,
+      endIdx: section.toPlaza.routeCoordIndex,
+      detourCoords: input.bypassDetours?.[section.id]?.coordinates ?? [],
+    }))
+    .filter((span) => span.detourCoords.length > 1)
+    .sort((a, b) => a.startIdx - b.startIdx);
+
+  if (activeBypassSpans.length === 0) return input.route.coordinates;
+
+  const stitched: Array<[number, number]> = [];
+  let cursor = 0;
+
+  for (const span of activeBypassSpans) {
+    const clampedStart = Math.max(cursor, span.startIdx);
+    for (let i = cursor; i < clampedStart && i < input.route.coordinates.length; i += 1) {
+      const coord = input.route.coordinates[i];
+      if (coord) stitched.push(coord);
+    }
+    stitched.push(...span.detourCoords);
+    cursor = Math.max(cursor, span.endIdx + 1);
+  }
+
+  for (let i = cursor; i < input.route.coordinates.length; i += 1) {
+    const coord = input.route.coordinates[i];
+    if (coord) stitched.push(coord);
+  }
+
+  return stitched;
+};
+
 export const buildGpxContent = (input: RouteExportInput): string => {
   const waypoints = collectOrderedExportWaypoints(input);
   const routeTitle = `${input.origin.label} → ${input.destination.label}`;
@@ -171,6 +233,10 @@ export const buildGpxContent = (input: RouteExportInput): string => {
       wptLines.push(
         `  <wpt lat="${formatCoord(wp.lat)}" lon="${formatCoord(wp.lon)}"><name>${escapeXml(`Étape ${stopNumber} : ${wp.name}`)}</name></wpt>`,
       );
+    } else if (wp.kind === "bypass") {
+      wptLines.push(
+        `  <wpt lat="${formatCoord(wp.lat)}" lon="${formatCoord(wp.lon)}"><name>${escapeXml(wp.name)}</name></wpt>`,
+      );
     } else {
       wptLines.push(
         `  <wpt lat="${formatCoord(wp.lat)}" lon="${formatCoord(wp.lon)}"><name>${escapeXml(`Sortie : ${wp.name}`)}</name></wpt>`,
@@ -182,7 +248,8 @@ export const buildGpxContent = (input: RouteExportInput): string => {
     `  <wpt lat="${formatCoord(input.destination.lat)}" lon="${formatCoord(input.destination.lon)}"><name>${escapeXml(`Arrivée : ${input.destination.label}`)}</name></wpt>`,
   );
 
-  const trkptLines = input.route.coordinates.map(
+  const trackCoords = buildStitchedTrackCoordinates(input);
+  const trkptLines = trackCoords.map(
     ([lon, lat]) => `      <trkpt lat="${formatCoord(lat)}" lon="${formatCoord(lon)}" />`,
   );
 

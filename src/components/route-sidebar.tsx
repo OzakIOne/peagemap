@@ -19,14 +19,22 @@ import {
   Truck,
 } from "lucide-solid";
 import { For, Show, createSignal } from "solid-js";
-import { SPLIT_EXTRA_MINUTES, estimateFuelCostEur } from "~/domain/toll-calculator";
+import {
+  SPLIT_EXTRA_KM,
+  SPLIT_EXTRA_MINUTES,
+  computeSectionHourlyRateEur,
+  estimateFuelCostEur,
+  evaluateIntermediateSplitCandidates,
+} from "~/domain/toll-calculator";
 import {
   VEHICLE_CLASS_META,
+  type BypassDetour,
   type ClosedTollRun,
   type OptimizationResult,
   type PlaceSuggestion,
   type PricedRouteSummary,
   type RouteGeometry,
+  type TollDataset,
   type VehicleClass,
 } from "~/domain/toll-types";
 import { PRESET_TRIPS, formatDuration, formatEur, formatKm } from "~/lib/format";
@@ -46,6 +54,7 @@ export interface RouteStopItem {
 }
 
 interface RouteSidebarProps {
+  dataset: TollDataset | null;
   datasetStats: { plazaCount: number; tariffCount: number; version: string } | null;
   origin: PlaceSuggestion | null;
   destination: PlaceSuggestion | null;
@@ -70,6 +79,8 @@ interface RouteSidebarProps {
   showTollFree: boolean;
   onToggleShowTollFree: () => void;
   summary: PricedRouteSummary | null;
+  bypassDetours: Readonly<Record<string, BypassDetour>>;
+  loadingBypassIds: ReadonlySet<string>;
   optimization: OptimizationResult | null;
   maxAddedMinutes: number;
   onChangeMaxAddedMinutes: (minutes: number) => void;
@@ -87,11 +98,12 @@ interface RouteSidebarProps {
 }
 
 export const RouteSidebar = (props: RouteSidebarProps) => {
-  const [expandedRunIds, setExpandedRunIds] = createSignal<Set<string>>(new Set());
+  const [collapsedRunIds, setCollapsedRunIds] = createSignal<Set<string>>(new Set());
+  const [onlyProfitableSplits, setOnlyProfitableSplits] = createSignal(true);
   const [showFuelSettings, setShowFuelSettings] = createSignal(false);
 
-  const toggleRunExpanded = (runId: string) => {
-    setExpandedRunIds((prev) => {
+  const toggleRunCollapsed = (runId: string) => {
+    setCollapsedRunIds((prev) => {
       const next = new Set(prev);
       if (next.has(runId)) {
         next.delete(runId);
@@ -105,6 +117,34 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
   const highwayKm = () => (props.highwayRoute ? props.highwayRoute.distanceMeters / 1000 : 0);
   const highwayMinutes = () => (props.highwayRoute ? props.highwayRoute.durationSeconds / 60 : 0);
 
+  const effectiveAddedMinutes = () => {
+    const summary = props.summary;
+    if (!summary) return 0;
+    let total = summary.splitCount * SPLIT_EXTRA_MINUTES;
+    for (const section of summary.sections) {
+      if (!section.isBypassed) continue;
+      const detour = props.bypassDetours[section.id];
+      total += detour ? detour.extraMinutes : section.bypassExtraMinutes;
+    }
+    return Math.round(total);
+  };
+
+  const effectiveAddedDistanceKm = () => {
+    const summary = props.summary;
+    if (!summary) return 0;
+    let total = summary.splitCount * SPLIT_EXTRA_KM;
+    for (const section of summary.sections) {
+      if (!section.isBypassed) continue;
+      const detour = props.bypassDetours[section.id];
+      total += detour
+        ? detour.extraDistanceKm
+        : section.kind === "open"
+          ? 3.5
+          : Math.round(section.distanceKm * 0.12 * 10) / 10;
+    }
+    return Math.round(total * 10) / 10;
+  };
+
   const directFuelEur = () =>
     estimateFuelCostEur({
       distanceKm: highwayKm(),
@@ -114,7 +154,7 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
 
   const currentFuelEur = () =>
     estimateFuelCostEur({
-      distanceKm: highwayKm() + (props.summary?.addedDistanceKm ?? 0),
+      distanceKm: Math.max(0, highwayKm() + effectiveAddedDistanceKm()),
       litersPer100Km: props.litersPer100Km,
       fuelPricePerLiterEur: props.fuelPricePerLiter,
     });
@@ -154,6 +194,8 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
       stops: activeStops(),
       route: activeRoute,
       units: props.summary?.units ?? [],
+      sections: props.summary?.sections ?? [],
+      bypassDetours: props.bypassDetours,
       splitPlazaIds: props.splitPlazaIds,
       avoidTolls: useTollFree || allSectionsBypassed,
     };
@@ -506,8 +548,8 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                         </Show>
                       </div>
                       <div class="mt-1.5 border-t border-emerald-500/20 pt-1 text-[10px] text-slate-300">
-                        {formatDuration(highwayMinutes() + summary().addedMinutes)} ·{" "}
-                        {formatKm(highwayKm() + summary().addedDistanceKm)}
+                        {formatDuration(highwayMinutes() + effectiveAddedMinutes())} ·{" "}
+                        {formatKm(Math.max(0, highwayKm() + effectiveAddedDistanceKm()))}
                       </div>
                     </div>
 
@@ -545,6 +587,8 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                       waypoints().filter((waypoint) => waypoint.kind === "stop").length;
                     const splitExportCount = () =>
                       waypoints().filter((waypoint) => waypoint.kind === "split").length;
+                    const bypassExportCount = () =>
+                      waypoints().filter((waypoint) => waypoint.kind === "bypass").length;
                     const exportSummaryLabel = () => {
                       if (payload().avoidTolls) {
                         return stopCount() > 0
@@ -558,6 +602,11 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                       if (splitExportCount() > 0) {
                         parts.push(
                           `${splitExportCount()} sortie${splitExportCount() > 1 ? "s" : ""} péage`,
+                        );
+                      }
+                      if (bypassExportCount() > 0) {
+                        parts.push(
+                          `${bypassExportCount()} détour${bypassExportCount() > 1 ? "s" : ""}`,
                         );
                       }
                       return parts.length > 0 ? `Inclut ${parts.join(" + ")}` : "Trajet direct";
@@ -650,16 +699,28 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                       </div>
                     }
                   >
-                    <div class="space-y-2">
+                    <div class="space-y-2.5">
                       <For each={summary().sections}>
                         {(section) => {
                           const isSelected = () => props.selectedSectionId === section.id;
+                          const detour = () => props.bypassDetours[section.id];
+                          const isLoadingDetour = () =>
+                            section.isBypassed && props.loadingBypassIds.has(section.id);
+                          const savedMinutes = () =>
+                            detour()?.extraMinutes ?? section.bypassExtraMinutes;
+                          const hourlyRateEur = () =>
+                            computeSectionHourlyRateEur({
+                              priceEur: section.basePriceEur,
+                              savedMinutes: savedMinutes(),
+                            });
+                          const isExactRate = () => Boolean(detour());
+
                           return (
                             <div
                               onClick={() => props.onSelectSection(section.id)}
                               class={`cursor-pointer rounded-xl border p-3 transition-all ${
                                 section.isBypassed
-                                  ? "border-amber-500/40 bg-amber-950/20"
+                                  ? "border-amber-400/55 bg-amber-950/25"
                                   : isSelected()
                                     ? "border-sky-400/70 bg-slate-900"
                                     : "border-slate-800 bg-slate-900/60 hover:border-slate-700"
@@ -667,7 +728,7 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                             >
                               <div class="flex items-start justify-between gap-2">
                                 <div class="min-w-0 flex-1">
-                                  <div class="flex items-center gap-1.5">
+                                  <div class="flex flex-wrap items-center gap-1.5">
                                     <span class="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-bold text-sky-300">
                                       {section.highway}
                                     </span>
@@ -679,6 +740,11 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                                         Fractionné
                                       </span>
                                     </Show>
+                                    <Show when={section.isBypassed}>
+                                      <span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+                                        Hors péage
+                                      </span>
+                                    </Show>
                                   </div>
                                   <div class="mt-1 truncate text-xs font-semibold text-slate-100">
                                     <Show
@@ -688,48 +754,108 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                                       {section.fromPlaza.plaza.name} → {section.toPlaza.plaza.name}
                                     </Show>
                                   </div>
-                                  <div class="mt-0.5 text-[11px] text-slate-400">
+                                  <div class="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-slate-400">
                                     <Show
                                       when={section.kind === "closed"}
-                                      fallback="Système ouvert"
+                                      fallback={<span>Système ouvert</span>}
                                     >
-                                      {formatKm(section.distanceKm)}
-                                      {section.basePriceEur !== null && section.distanceKm > 0
-                                        ? ` · ${(section.basePriceEur / section.distanceKm).toFixed(2)} €/km`
-                                        : ""}
+                                      <span>{formatKm(section.distanceKm)}</span>
+                                      <Show
+                                        when={
+                                          section.basePriceEur !== null && section.distanceKm > 0
+                                        }
+                                      >
+                                        <span>
+                                          ·{" "}
+                                          {(section.basePriceEur! / section.distanceKm).toFixed(2)}{" "}
+                                          €/km
+                                        </span>
+                                      </Show>
+                                    </Show>
+                                    <Show when={hourlyRateEur()}>
+                                      {(rate) => (
+                                        <span
+                                          title={`Prendre cette section autoroute revient à ${isExactRate() ? "" : "~"}${formatEur(rate())} par heure gagnée par rapport au contournement hors péage`}
+                                          class={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                            rate() >= 25
+                                              ? "bg-amber-500/15 text-amber-300"
+                                              : "bg-slate-800 text-slate-300"
+                                          }`}
+                                        >
+                                          {isExactRate() ? "" : "~"}
+                                          {formatEur(rate())}/h gagnée
+                                        </span>
+                                      )}
                                     </Show>
                                   </div>
                                 </div>
 
-                                <div class="flex flex-col items-end gap-1.5">
-                                  <span
-                                    class={`text-sm font-bold ${
-                                      section.isBypassed
-                                        ? "text-amber-300 line-through"
-                                        : "text-slate-100"
-                                    }`}
+                                <div class="flex shrink-0 flex-col items-end">
+                                  <Show
+                                    when={section.isBypassed}
+                                    fallback={
+                                      <span class="text-sm font-bold text-slate-100">
+                                        {section.basePriceEur !== null
+                                          ? formatEur(section.basePriceEur)
+                                          : "N/C"}
+                                      </span>
+                                    }
                                   >
-                                    {section.basePriceEur !== null
-                                      ? formatEur(section.basePriceEur)
-                                      : "N/C"}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      props.onToggleBypassSection(section.id);
-                                    }}
-                                    class={`rounded-md px-2 py-0.5 text-[10px] font-semibold transition-colors ${
-                                      section.isBypassed
-                                        ? "bg-amber-500 text-slate-950 hover:bg-amber-400"
-                                        : "border border-slate-700 bg-slate-800/80 text-slate-300 hover:border-amber-400/60 hover:text-amber-200"
-                                    }`}
-                                  >
-                                    {section.isBypassed
-                                      ? `Évité (+${section.bypassExtraMinutes}m)`
-                                      : "Éviter (0 €)"}
-                                  </button>
+                                    <span class="text-sm font-bold text-amber-300">0,00 €</span>
+                                    <Show when={section.basePriceEur !== null}>
+                                      <span class="text-[10px] text-slate-500 line-through">
+                                        {formatEur(section.basePriceEur!)}
+                                      </span>
+                                    </Show>
+                                  </Show>
                                 </div>
+                              </div>
+
+                              <div class="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-800/80 pt-2">
+                                <Show
+                                  when={section.isBypassed}
+                                  fallback={
+                                    <span class="text-[11px] text-slate-400">
+                                      Gain autoroute : ~{savedMinutes()} min
+                                    </span>
+                                  }
+                                >
+                                  <Show
+                                    when={!isLoadingDetour()}
+                                    fallback={
+                                      <span class="flex items-center gap-1.5 text-[11px] text-amber-300">
+                                        <Loader2 class="h-3 w-3 animate-spin" />
+                                        Calcul du contournement…
+                                      </span>
+                                    }
+                                  >
+                                    <span class="text-[11px] font-medium text-amber-200/90">
+                                      Détour : +{savedMinutes()} min
+                                      <Show when={detour()}>
+                                        {(d) =>
+                                          ` · ${d().extraDistanceKm >= 0 ? "+" : ""}${d().extraDistanceKm.toFixed(1)} km`
+                                        }
+                                      </Show>
+                                    </span>
+                                  </Show>
+                                </Show>
+
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    props.onToggleBypassSection(section.id);
+                                  }}
+                                  class={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                                    section.isBypassed
+                                      ? "border border-amber-400/50 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30"
+                                      : "border border-slate-700 bg-slate-800/90 text-slate-200 hover:border-amber-400/60 hover:bg-amber-950/40 hover:text-amber-200"
+                                  }`}
+                                >
+                                  {section.isBypassed
+                                    ? "Reprendre l’autoroute"
+                                    : "Contourner hors péage"}
+                                </button>
                               </div>
                             </div>
                           );
@@ -739,26 +865,77 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                   </Show>
                 </section>
 
-                <Show when={closedRuns().length > 0}>
-                  <section class="space-y-2 pb-4">
-                    <div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      <SlidersHorizontal class="h-3.5 w-3.5" />
-                      Modifier les sorties intermédiaires
+                <Show when={closedRuns().length > 0 && props.dataset}>
+                  <section class="space-y-2.5 pb-4">
+                    <div class="flex items-start justify-between gap-2">
+                      <div>
+                        <div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-300">
+                          <SlidersHorizontal class="h-3.5 w-3.5 text-emerald-400" />
+                          Sorties intermédiaires (fractionnement)
+                        </div>
+                        <p class="mt-0.5 text-[11px] text-slate-400">
+                          Sortir puis rerentrer au même péage (+{SPLIT_EXTRA_MINUTES} min) pour
+                          payer moins cher.
+                        </p>
+                      </div>
                     </div>
+
+                    <div class="grid grid-cols-2 gap-1 rounded-xl border border-slate-800 bg-slate-900/70 p-1">
+                      <button
+                        type="button"
+                        onClick={() => setOnlyProfitableSplits(true)}
+                        class={`rounded-lg px-2 py-1 text-[11px] font-semibold transition-colors ${
+                          onlyProfitableSplits()
+                            ? "bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-500/40"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Rentables uniquement
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setOnlyProfitableSplits(false)}
+                        class={`rounded-lg px-2 py-1 text-[11px] font-semibold transition-colors ${
+                          !onlyProfitableSplits()
+                            ? "bg-sky-500/20 text-sky-200 ring-1 ring-sky-500/40"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Toutes les sorties
+                      </button>
+                    </div>
+
                     <For each={closedRuns()}>
                       {(run) => {
-                        const intermediatePlazas = () => run.plazas.slice(1, -1);
-                        const isExpanded = () => expandedRunIds().has(run.id);
+                        const insights = () =>
+                          props.dataset
+                            ? evaluateIntermediateSplitCandidates({
+                                dataset: props.dataset,
+                                run,
+                                vehicleClass: props.vehicleClass,
+                                splitPlazaIds: props.splitPlazaIds,
+                              })
+                            : [];
+                        const profitableCount = () =>
+                          insights().filter(
+                            (item) => (item.savingsEur ?? 0) > 0.05 || item.isActive,
+                          ).length;
+                        const visibleInsights = () =>
+                          onlyProfitableSplits()
+                            ? insights().filter(
+                                (item) => (item.savingsEur ?? 0) > 0.05 || item.isActive,
+                              )
+                            : insights();
+                        const isCollapsed = () => collapsedRunIds().has(run.id);
                         const activeSplitsInRun = () =>
-                          intermediatePlazas().filter((m) => props.splitPlazaIds.has(m.plaza.id))
-                            .length;
+                          insights().filter((item) => item.isActive).length;
 
                         return (
-                          <Show when={intermediatePlazas().length > 0}>
+                          <Show when={insights().length > 0}>
                             <div class="rounded-xl border border-slate-800 bg-slate-900/50">
                               <button
                                 type="button"
-                                onClick={() => toggleRunExpanded(run.id)}
+                                onClick={() => toggleRunCollapsed(run.id)}
                                 class="flex w-full items-center justify-between px-3 py-2.5 text-left"
                               >
                                 <div>
@@ -766,57 +943,97 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                                     {run.concessionaire} ({run.highways.join(" / ")})
                                   </div>
                                   <div class="text-[11px] text-slate-400">
-                                    {intermediatePlazas().length} échangeurs ·{" "}
                                     <span class="text-emerald-300">
-                                      {activeSplitsInRun()} sortie
-                                      {activeSplitsInRun() > 1 ? "s" : ""} active
-                                      {activeSplitsInRun() > 1 ? "s" : ""}
-                                    </span>
+                                      {profitableCount()} rentable
+                                      {profitableCount() > 1 ? "s" : ""}
+                                    </span>{" "}
+                                    sur {insights().length} · {activeSplitsInRun()} active
+                                    {activeSplitsInRun() > 1 ? "s" : ""}
                                   </div>
                                 </div>
                                 <Show
-                                  when={isExpanded()}
+                                  when={!isCollapsed()}
                                   fallback={<ChevronDown class="h-4 w-4 text-slate-400" />}
                                 >
                                   <ChevronUp class="h-4 w-4 text-slate-400" />
                                 </Show>
                               </button>
 
-                              <Show when={isExpanded()}>
+                              <Show when={!isCollapsed()}>
                                 <div class="max-h-64 space-y-1 overflow-y-auto border-t border-slate-800 p-2">
-                                  <For each={intermediatePlazas()}>
-                                    {(matched) => {
-                                      const isSplit = () =>
-                                        props.splitPlazaIds.has(matched.plaza.id);
-                                      return (
-                                        <button
-                                          type="button"
-                                          onClick={() => props.onToggleSplitPlaza(matched.plaza.id)}
-                                          class={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${
-                                            isSplit()
-                                              ? "bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-500/40"
-                                              : "text-slate-300 hover:bg-slate-800/80"
-                                          }`}
-                                        >
-                                          <div class="min-w-0 flex-1 pr-2">
-                                            <span class="truncate font-medium">
-                                              {matched.plaza.name}
-                                            </span>
-                                            <span class="ml-1.5 text-[10px] text-slate-500">
-                                              {matched.plaza.highway}
-                                              {matched.plaza.exitNumber
-                                                ? ` · n°${matched.plaza.exitNumber}`
-                                                : ""}
-                                            </span>
-                                          </div>
-                                          <span class="flex shrink-0 items-center gap-1 text-[10px] font-semibold">
-                                            <Scissors class="h-3 w-3" />
-                                            {isSplit() ? "Actif" : "Sortir"}
-                                          </span>
-                                        </button>
-                                      );
-                                    }}
-                                  </For>
+                                  <Show
+                                    when={visibleInsights().length > 0}
+                                    fallback={
+                                      <div class="px-2 py-2 text-center text-[11px] text-slate-400">
+                                        Aucune sortie rentable sur ce tronçon. Cliquez « Toutes les
+                                        sorties » pour les voir quand même.
+                                      </div>
+                                    }
+                                  >
+                                    <For each={visibleInsights()}>
+                                      {(item) => {
+                                        const isProfitable = () => (item.savingsEur ?? 0) > 0.05;
+                                        return (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              props.onToggleSplitPlaza(item.matched.plaza.id)
+                                            }
+                                            class={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${
+                                              item.isActive
+                                                ? "bg-emerald-500/20 text-emerald-100 ring-1 ring-emerald-500/50"
+                                                : isProfitable()
+                                                  ? "bg-slate-900/90 text-slate-200 hover:bg-emerald-950/40"
+                                                  : "text-slate-400 hover:bg-slate-800/70"
+                                            }`}
+                                          >
+                                            <div class="min-w-0 flex-1">
+                                              <div class="truncate font-medium">
+                                                {item.matched.plaza.name}
+                                              </div>
+                                              <div class="text-[10px] text-slate-500">
+                                                {item.matched.plaza.highway}
+                                                {item.matched.plaza.exitNumber
+                                                  ? ` · n°${item.matched.plaza.exitNumber}`
+                                                  : ""}
+                                                <Show when={item.savingsPerHourEur}>
+                                                  {(rate) => ` · ${formatEur(rate())}/h`}
+                                                </Show>
+                                              </div>
+                                            </div>
+
+                                            <div class="flex shrink-0 items-center gap-2">
+                                              <Show when={item.savingsEur !== null}>
+                                                <span
+                                                  class={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
+                                                    isProfitable()
+                                                      ? "bg-emerald-500/20 text-emerald-300"
+                                                      : "bg-slate-800 text-slate-400"
+                                                  }`}
+                                                >
+                                                  {item.savingsEur! > 0
+                                                    ? `-${formatEur(item.savingsEur!)}`
+                                                    : item.savingsEur! < 0
+                                                      ? `+${formatEur(Math.abs(item.savingsEur!))}`
+                                                      : "0,00 €"}
+                                                </span>
+                                              </Show>
+                                              <span
+                                                class={`flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold ${
+                                                  item.isActive
+                                                    ? "bg-emerald-500 text-slate-950"
+                                                    : "border border-slate-700 text-slate-300"
+                                                }`}
+                                              >
+                                                <Scissors class="h-3 w-3" />
+                                                {item.isActive ? "Actif" : "+4m"}
+                                              </span>
+                                            </div>
+                                          </button>
+                                        );
+                                      }}
+                                    </For>
+                                  </Show>
                                 </div>
                               </Show>
                             </div>

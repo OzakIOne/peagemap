@@ -6,6 +6,7 @@ import type {
   OptimizationResult,
   PricedRouteSummary,
   PricedTollSection,
+  SplitCandidateInsight,
   TollDataset,
   TollPlaza,
   VehicleClass,
@@ -620,4 +621,94 @@ export const estimateFuelCostEur = (params: {
 }): number => {
   const { distanceKm, litersPer100Km, fuelPricePerLiterEur } = params;
   return roundEur((distanceKm / 100) * litersPer100Km * fuelPricePerLiterEur);
+};
+
+export const computeSectionHourlyRateEur = (params: {
+  priceEur: number | null;
+  savedMinutes: number;
+}): number | null => {
+  const { priceEur, savedMinutes } = params;
+  if (priceEur === null || priceEur <= 0 || savedMinutes <= 0) return null;
+  return Math.round((priceEur / (savedMinutes / 60)) * 10) / 10;
+};
+
+export const evaluateIntermediateSplitCandidates = (params: {
+  dataset: TollDataset;
+  run: ClosedTollRun;
+  vehicleClass: VehicleClass;
+  splitPlazaIds: ReadonlySet<string>;
+}): SplitCandidateInsight[] => {
+  const { dataset, run, vehicleClass, splitPlazaIds } = params;
+  const totalPlazas = run.plazas.length;
+  if (totalPlazas < 3) return [];
+
+  const activeIndices: number[] = [0];
+  for (let i = 1; i < totalPlazas - 1; i += 1) {
+    const candidate = run.plazas[i];
+    if (candidate && splitPlazaIds.has(candidate.plaza.id)) {
+      activeIndices.push(i);
+    }
+  }
+  activeIndices.push(totalPlazas - 1);
+
+  const insights: SplitCandidateInsight[] = [];
+
+  for (let i = 1; i < totalPlazas - 1; i += 1) {
+    const matched = run.plazas[i];
+    if (!matched) continue;
+
+    const isActive = splitPlazaIds.has(matched.plaza.id);
+
+    let prevIdx = 0;
+    let nextIdx = totalPlazas - 1;
+    for (const boundaryIdx of activeIndices) {
+      if (boundaryIdx < i) {
+        prevIdx = boundaryIdx;
+      } else if (boundaryIdx > i) {
+        nextIdx = boundaryIdx;
+        break;
+      }
+    }
+
+    const prevPlaza = run.plazas[prevIdx];
+    const nextPlaza = run.plazas[nextIdx];
+    if (!prevPlaza || !nextPlaza) continue;
+
+    const directCost = lookupTariffEur({
+      dataset,
+      fromId: prevPlaza.plaza.id,
+      toId: nextPlaza.plaza.id,
+      vehicleClass,
+    });
+    const firstLegCost = lookupTariffEur({
+      dataset,
+      fromId: prevPlaza.plaza.id,
+      toId: matched.plaza.id,
+      vehicleClass,
+    });
+    const secondLegCost = lookupTariffEur({
+      dataset,
+      fromId: matched.plaza.id,
+      toId: nextPlaza.plaza.id,
+      vehicleClass,
+    });
+
+    const savingsEur =
+      directCost !== null && firstLegCost !== null && secondLegCost !== null
+        ? roundEur(directCost - (firstLegCost + secondLegCost))
+        : null;
+    const savingsPerHourEur =
+      savingsEur !== null && savingsEur > 0
+        ? roundEur((savingsEur / SPLIT_EXTRA_MINUTES) * 60)
+        : null;
+
+    insights.push({
+      matched,
+      isActive,
+      savingsEur,
+      savingsPerHourEur,
+    });
+  }
+
+  return insights;
 };

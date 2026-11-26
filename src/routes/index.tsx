@@ -7,11 +7,12 @@ import { evaluateRouteTolls, optimizeTollSplits } from "~/domain/toll-calculator
 import {
   TollDatasetSchema,
   VEHICLE_CLASS_META,
+  type BypassDetour,
   type PlaceSuggestion,
   type TollDataset,
   type VehicleClass,
 } from "~/domain/toll-types";
-import { computeDualRoutes } from "~/server/routing";
+import { computeBypassSegment, computeDualRoutes } from "~/server/routing";
 
 const fetchTollDataset = async (): Promise<TollDataset> => {
   const response = await fetch("/data/tolls-fr-2026.json");
@@ -32,6 +33,8 @@ const HomePage = () => {
   const [vehicleClass, setVehicleClass] = createSignal<VehicleClass>("c1");
   const [splitPlazaIds, setSplitPlazaIds] = createSignal<Set<string>>(new Set());
   const [bypassedSectionIds, setBypassedSectionIds] = createSignal<Set<string>>(new Set());
+  const [bypassDetours, setBypassDetours] = createSignal<Record<string, BypassDetour>>({});
+  const [loadingBypassIds, setLoadingBypassIds] = createSignal<Set<string>>(new Set());
   const [maxAddedMinutes, setMaxAddedMinutes] = createSignal(12);
   const [showTollFree, setShowTollFree] = createSignal(false);
   const [selectedSectionId, setSelectedSectionId] = createSignal<string | null>(null);
@@ -82,6 +85,8 @@ const HomePage = () => {
     };
   });
 
+  let routeGeneration = 0;
+
   createEffect(() => {
     const _from = origin();
     const _to = destination();
@@ -89,8 +94,11 @@ const HomePage = () => {
       .map((stop) => `${stop.lon},${stop.lat}`)
       .join(";");
     if (_from || _to || _stopsKey.length > 0) {
+      routeGeneration += 1;
       setSplitPlazaIds(new Set<string>());
       setBypassedSectionIds(new Set<string>());
+      setBypassDetours({});
+      setLoadingBypassIds(new Set<string>());
       setSelectedSectionId(null);
     }
   });
@@ -127,6 +135,88 @@ const HomePage = () => {
       vehicleClass: vehicleClass(),
       maxAddedMinutes: maxAddedMinutes(),
     });
+  });
+
+  createEffect(() => {
+    const currentSummary = summary();
+    const highway = routeData()?.highway;
+    if (!currentSummary || !highway) return;
+
+    const cached = bypassDetours();
+    const loading = loadingBypassIds();
+    const generation = routeGeneration;
+    const totalHighwayKm = highway.distanceMeters / 1000;
+    const totalHighwayMinutes = highway.durationSeconds / 60;
+
+    for (const section of currentSummary.sections) {
+      if (!section.isBypassed) continue;
+      if (cached[section.id] || loading.has(section.id)) continue;
+
+      let fromPoint = { lon: section.fromPlaza.plaza.lon, lat: section.fromPlaza.plaza.lat };
+      let toPoint = { lon: section.toPlaza.plaza.lon, lat: section.toPlaza.plaza.lat };
+
+      if (section.kind === "open") {
+        const startIdx = Math.max(0, section.fromPlaza.routeCoordIndex - 15);
+        const endIdx = Math.min(
+          highway.coordinates.length - 1,
+          section.toPlaza.routeCoordIndex + 15,
+        );
+        const startCoord = highway.coordinates[startIdx];
+        const endCoord = highway.coordinates[endIdx];
+        if (startCoord && endCoord) {
+          fromPoint = { lon: startCoord[0], lat: startCoord[1] };
+          toPoint = { lon: endCoord[0], lat: endCoord[1] };
+        }
+      }
+
+      setLoadingBypassIds((prev) => {
+        const next = new Set(prev);
+        next.add(section.id);
+        return next;
+      });
+
+      void computeBypassSegment({
+        data: { from: fromPoint, to: toPoint },
+      })
+        .then((detourRoute) => {
+          if (generation !== routeGeneration) return;
+          if (!detourRoute || detourRoute.coordinates.length < 2) return;
+
+          const highwaySectionMinutes =
+            section.kind === "open"
+              ? 3
+              : totalHighwayKm > 0
+                ? (section.distanceKm / totalHighwayKm) * totalHighwayMinutes
+                : (section.distanceKm / 115) * 60;
+          const extraMinutes = Math.max(
+            1,
+            Math.round(detourRoute.durationSeconds / 60 - highwaySectionMinutes),
+          );
+          const extraDistanceKm =
+            Math.round((detourRoute.distanceMeters / 1000 - section.distanceKm) * 10) / 10;
+
+          setBypassDetours((prev) => ({
+            ...prev,
+            [section.id]: {
+              sectionId: section.id,
+              coordinates: detourRoute.coordinates,
+              distanceMeters: detourRoute.distanceMeters,
+              durationSeconds: detourRoute.durationSeconds,
+              extraMinutes,
+              extraDistanceKm,
+            },
+          }));
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (generation !== routeGeneration) return;
+          setLoadingBypassIds((prev) => {
+            const next = new Set(prev);
+            next.delete(section.id);
+            return next;
+          });
+        });
+    }
   });
 
   const handleAddStop = () => {
@@ -220,6 +310,7 @@ const HomePage = () => {
   return (
     <main class="flex h-dvh w-screen overflow-hidden bg-slate-950 text-slate-100">
       <RouteSidebar
+        dataset={dataset()}
         datasetStats={datasetStats()}
         origin={origin()}
         destination={destination()}
@@ -258,6 +349,8 @@ const HomePage = () => {
         showTollFree={showTollFree()}
         onToggleShowTollFree={() => setShowTollFree((v) => !v)}
         summary={summary()}
+        bypassDetours={bypassDetours()}
+        loadingBypassIds={loadingBypassIds()}
         optimization={optimization()}
         maxAddedMinutes={maxAddedMinutes()}
         onChangeMaxAddedMinutes={setMaxAddedMinutes}
@@ -284,6 +377,8 @@ const HomePage = () => {
           showTollFree={showTollFree()}
           units={summary()?.units ?? []}
           sections={summary()?.sections ?? []}
+          bypassDetours={bypassDetours()}
+          loadingBypassIds={loadingBypassIds()}
           splitPlazaIds={splitPlazaIds()}
           selectedSectionId={selectedSectionId()}
           onToggleSplitPlaza={handleToggleSplitPlaza}

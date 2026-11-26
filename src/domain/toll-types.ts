@@ -151,3 +151,19 @@ export interface OptimizationResult {
   addedMinutes: number;
   savingsPerHourEur: number;
 }
+
+export interface BypassDetour {
+  sectionId: string;
+  coordinates: Array<[number, number]>;
+  distanceMeters: number;
+  durationSeconds: number;
+  extraMinutes: number;
+  extraDistanceKm: number;
+}
+
+export interface SplitCandidateInsight {
+  matched: MatchedPlaza;
+  isActive: boolean;
+  savingsEur: number | null;
+  savingsPerHourEur: number | null;
+}

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   SPLIT_EXTRA_MINUTES,
+  computeSectionHourlyRateEur,
   estimateFuelCostEur,
+  evaluateIntermediateSplitCandidates,
   evaluateRouteTolls,
   optimizeTollSplits,
 } from "./toll-calculator";
@@ -192,5 +194,37 @@ describe("toll-calculator", () => {
         fuelPricePerLiterEur: 1.8,
       }),
     ).toBe(58.5);
+  });
+
+  it("computes hourly toll rate per saved hour", () => {
+    expect(computeSectionHourlyRateEur({ priceEur: 10, savedMinutes: 30 })).toBe(20);
+    expect(computeSectionHourlyRateEur({ priceEur: 15, savedMinutes: 20 })).toBe(45);
+    expect(computeSectionHourlyRateEur({ priceEur: null, savedMinutes: 30 })).toBeNull();
+    expect(computeSectionHourlyRateEur({ priceEur: 10, savedMinutes: 0 })).toBeNull();
+  });
+
+  it("evaluates exact marginal savings for intermediate split exits", () => {
+    const base = evaluateRouteTolls({
+      dataset: sampleDataset,
+      coordinates: sampleRoute,
+      vehicleClass: "c1",
+      splitPlazaIds: new Set(),
+      bypassedSectionIds: new Set(),
+    });
+    const closedRun = base.units.find((unit) => unit.kind === "closed");
+    expect(closedRun).toBeDefined();
+    if (!closedRun || closedRun.kind !== "closed") return;
+
+    const insights = evaluateIntermediateSplitCandidates({
+      dataset: sampleDataset,
+      run: closedRun,
+      vehicleClass: "c1",
+      splitPlazaIds: new Set(),
+    });
+
+    expect(insights).toHaveLength(2);
+    expect(insights[0]?.matched.plaza.id).toBe("aprr:auxerre-sud");
+    expect(insights[0]?.savingsEur).toBe(2.7);
+    expect(insights[0]?.savingsPerHourEur).toBe(40.5);
   });
 });

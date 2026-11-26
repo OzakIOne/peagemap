@@ -251,3 +251,17 @@ export const computeDualRoutes = createServerFn({ method: "GET" })
       tollFree,
     };
   });
+
+const BypassSegmentRequestSchema = z.object({
+  from: CoordinatePointSchema,
+  to: CoordinatePointSchema,
+});
+
+export const computeBypassSegment = createServerFn({ method: "GET" })
+  .validator((input: unknown) => BypassSegmentRequestSchema.parse(input))
+  .handler(async ({ data }): Promise<RouteGeometry | null> => {
+    const points = [data.from, data.to];
+    const valhalla = await fetchValhallaTollFree({ points });
+    if (valhalla) return valhalla;
+    return fetchOsrmSingle({ points, excludeToll: true });
+  });

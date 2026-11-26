@@ -3,6 +3,7 @@ import type * as maplibregl from "maplibre-gl";
 import maplibreWorkerCode from "maplibre-gl/dist/maplibre-gl-worker.mjs?raw";
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type {
+  BypassDetour,
   MatchedTollUnit,
   PlaceSuggestion,
   PricedTollSection,
@@ -36,6 +37,8 @@ interface TollMapProps {
   showTollFree: boolean;
   units: MatchedTollUnit[];
   sections: PricedTollSection[];
+  bypassDetours: Readonly<Record<string, BypassDetour>>;
+  loadingBypassIds: ReadonlySet<string>;
   splitPlazaIds: ReadonlySet<string>;
   selectedSectionId: string | null;
   onToggleSplitPlaza: (plazaId: string) => void;
@@ -173,13 +176,49 @@ export const TollMap = (props: TollMapProps) => {
           "line-color": [
             "case",
             ["get", "isBypassed"],
-            "#f59e0b",
+            "#94a3b8",
             ["get", "isSplit"],
             "#10b981",
             "#38bdf8",
           ],
+          "line-width": ["case", ["get", "isBypassed"], 3.5, ["get", "isSelected"], 7, 5.5],
+          "line-opacity": ["case", ["get", "isBypassed"], 0.38, 1],
+        },
+      });
+    }
+
+    if (!map.getSource("bypass-detours")) {
+      map.addSource("bypass-detours", {
+        type: "geojson",
+        data: emptyFeatureCollection(),
+      });
+      map.addLayer({
+        id: "bypass-detours-glow",
+        type: "line",
+        source: "bypass-detours",
+        layout: {
+          "line-cap": "round",
+          "line-join": "round",
+        },
+        paint: {
+          "line-color": "#f59e0b",
+          "line-width": ["case", ["get", "isSelected"], 13, 10],
+          "line-opacity": ["case", ["get", "isSelected"], 0.4, 0.22],
+          "line-blur": 4,
+        },
+      });
+      map.addLayer({
+        id: "bypass-detours-line",
+        type: "line",
+        source: "bypass-detours",
+        layout: {
+          "line-cap": "round",
+          "line-join": "round",
+        },
+        paint: {
+          "line-color": "#f59e0b",
           "line-width": ["case", ["get", "isSelected"], 7, 5.5],
-          "line-opacity": ["case", ["get", "isBypassed"], 0.85, 1],
+          "line-opacity": 0.98,
         },
       });
     }
@@ -234,6 +273,28 @@ export const TollMap = (props: TollMapProps) => {
       });
     }
 
+    const detourSource = map.getSource("bypass-detours") as maplibregl.GeoJSONSource | undefined;
+    if (detourSource) {
+      const detourFeatures = props.sections
+        .filter((section) => section.isBypassed)
+        .map((section) => {
+          const detour = props.bypassDetours[section.id];
+          const coords =
+            detour && detour.coordinates.length > 1 ? detour.coordinates : section.coordinates;
+          if (coords.length < 2) return null;
+          return lineFeature(coords, {
+            id: section.id,
+            isSelected: props.selectedSectionId === section.id,
+          });
+        })
+        .filter((feature): feature is LineFeature => feature !== null);
+
+      void detourSource.setData({
+        type: "FeatureCollection",
+        features: detourFeatures,
+      });
+    }
+
     clearMarkers();
 
     if (props.origin) {
@@ -270,8 +331,12 @@ export const TollMap = (props: TollMapProps) => {
     }
 
     for (const section of props.sections) {
-      const midIdx = Math.floor(section.coordinates.length / 2);
-      const midCoord = section.coordinates[midIdx];
+      const detour = section.isBypassed ? props.bypassDetours[section.id] : undefined;
+      const isLoadingDetour = section.isBypassed && props.loadingBypassIds.has(section.id);
+      const pillCoords =
+        detour && detour.coordinates.length > 1 ? detour.coordinates : section.coordinates;
+      const midIdx = Math.floor(pillCoords.length / 2);
+      const midCoord = pillCoords[midIdx];
       if (!midCoord) continue;
 
       const pill = document.createElement("button");
@@ -286,7 +351,9 @@ export const TollMap = (props: TollMapProps) => {
       const ringClass = isSelected ? "ring-2 ring-white scale-110" : "hover:scale-105";
       pill.className = `cursor-pointer rounded-full border px-2.5 py-0.5 text-[11px] font-semibold tracking-tight shadow-xl backdrop-blur-md transition-transform ${toneClass} ${ringClass}`;
       pill.textContent = section.isBypassed
-        ? "0,00 € · évité"
+        ? isLoadingDetour
+          ? "0,00 € · calcul…"
+          : `0,00 € · +${detour?.extraMinutes ?? section.bypassExtraMinutes} min`
         : section.basePriceEur !== null
           ? formatEur(section.effectivePriceEur)
           : "Tarif N/C";
