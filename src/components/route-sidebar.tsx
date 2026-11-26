@@ -3,13 +3,19 @@ import {
   Car,
   ChevronDown,
   ChevronUp,
+  Download,
+  ExternalLink,
   Fuel,
   Loader2,
+  MapPin,
+  Navigation,
+  Plus,
   RotateCcw,
   Route,
   Scissors,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   Truck,
 } from "lucide-solid";
 import { For, Show, createSignal } from "solid-js";
@@ -24,14 +30,35 @@ import {
   type VehicleClass,
 } from "~/domain/toll-types";
 import { PRESET_TRIPS, formatDuration, formatEur, formatKm } from "~/lib/format";
+import {
+  buildAppleMapsUrl,
+  buildGoogleMapsUrl,
+  buildWazeUrl,
+  collectOrderedExportWaypoints,
+  downloadGpxFile,
+  type RouteExportInput,
+} from "~/lib/route-export";
 import { PlaceInput } from "./place-input";
+
+export interface RouteStopItem {
+  id: string;
+  place: PlaceSuggestion | null;
+}
 
 interface RouteSidebarProps {
   datasetStats: { plazaCount: number; tariffCount: number; version: string } | null;
   origin: PlaceSuggestion | null;
   destination: PlaceSuggestion | null;
+  stops: RouteStopItem[];
   onSelectOrigin: (place: PlaceSuggestion) => void;
+  onClearOrigin: () => void;
   onSelectDestination: (place: PlaceSuggestion) => void;
+  onClearDestination: () => void;
+  onAddStop: () => void;
+  onSelectStop: (stopId: string, place: PlaceSuggestion) => void;
+  onClearStop: (stopId: string) => void;
+  onRemoveStop: (stopId: string) => void;
+  onMoveStop: (stopId: string, direction: "up" | "down") => void;
   onSwapPlaces: () => void;
   onSelectPreset: (origin: PlaceSuggestion, destination: PlaceSuggestion) => void;
   vehicleClass: VehicleClass;
@@ -105,6 +132,33 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
   const closedRuns = (): ClosedTollRun[] =>
     (props.summary?.units ?? []).filter((unit): unit is ClosedTollRun => unit.kind === "closed");
 
+  const activeStops = (): PlaceSuggestion[] =>
+    props.stops
+      .map((stop) => stop.place)
+      .filter((place): place is PlaceSuggestion => place !== null);
+
+  const exportInput = (): RouteExportInput | null => {
+    if (!props.origin || !props.destination) return null;
+    const useTollFree = props.showTollFree && Boolean(props.tollFreeRoute);
+    const activeRoute = useTollFree ? props.tollFreeRoute : props.highwayRoute;
+    if (!activeRoute) return null;
+
+    const allSectionsBypassed =
+      Boolean(props.summary) &&
+      (props.summary?.sections.length ?? 0) > 0 &&
+      (props.summary?.sections.every((section) => section.isBypassed) ?? false);
+
+    return {
+      origin: props.origin,
+      destination: props.destination,
+      stops: activeStops(),
+      route: activeRoute,
+      units: props.summary?.units ?? [],
+      splitPlazaIds: props.splitPlazaIds,
+      avoidTolls: useTollFree || allSectionsBypassed,
+    };
+  };
+
   return (
     <aside class="z-20 flex h-full w-full max-w-[420px] flex-col border-r border-slate-800/90 bg-slate-950/94 backdrop-blur-xl">
       <header class="flex items-center justify-between border-b border-slate-800/80 px-4 py-3">
@@ -137,29 +191,93 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
 
       <div class="flex-1 overflow-y-auto px-4 py-3.5">
         <section class="space-y-2">
-          <div class="relative space-y-2">
+          <div class="space-y-2">
             <PlaceInput
               label="Départ (A)"
               placeholder="Ex : Paris, Lyon, Lille…"
               dotColorClass="bg-sky-400"
               value={props.origin}
               onSelect={(place) => props.onSelectOrigin(place)}
+              onClear={() => props.onClearOrigin()}
             />
-            <button
-              type="button"
-              aria-label="Inverser départ et arrivée"
-              onClick={() => props.onSwapPlaces()}
-              class="absolute right-3 top-1/2 z-10 -translate-y-1/2 rounded-lg border border-slate-700 bg-slate-900 p-1.5 text-slate-300 shadow-md transition-colors hover:border-sky-500/60 hover:text-sky-300"
-            >
-              <ArrowUpDown class="h-3.5 w-3.5" />
-            </button>
+
+            <For each={props.stops}>
+              {(stop, index) => (
+                <div class="flex items-center gap-1.5">
+                  <div class="min-w-0 flex-1">
+                    <PlaceInput
+                      label={`Étape ${index() + 1}`}
+                      placeholder="Ex : Dijon, Beaune, Valence…"
+                      dotColorClass="bg-indigo-500"
+                      badgeText={String(index() + 1)}
+                      value={stop.place}
+                      onSelect={(place) => props.onSelectStop(stop.id, place)}
+                      onClear={() => props.onClearStop(stop.id)}
+                    />
+                  </div>
+                  <div class="flex flex-col gap-0.5">
+                    <button
+                      type="button"
+                      aria-label={`Monter l'étape ${index() + 1}`}
+                      disabled={index() === 0}
+                      onClick={() => props.onMoveStop(stop.id, "up")}
+                      class="rounded-md border border-slate-800 bg-slate-900 p-1 text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
+                    >
+                      <ChevronUp class="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Descendre l'étape ${index() + 1}`}
+                      disabled={index() === props.stops.length - 1}
+                      onClick={() => props.onMoveStop(stop.id, "down")}
+                      class="rounded-md border border-slate-800 bg-slate-900 p-1 text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
+                    >
+                      <ChevronDown class="h-3 w-3" />
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={`Supprimer l'étape ${index() + 1}`}
+                    onClick={() => props.onRemoveStop(stop.id)}
+                    class="rounded-lg border border-slate-800 bg-slate-900 p-2 text-slate-400 transition-colors hover:border-rose-500/60 hover:bg-rose-950/40 hover:text-rose-300"
+                  >
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+            </For>
+
             <PlaceInput
               label="Arrivée (B)"
               placeholder="Ex : Marseille, Bordeaux, Nice…"
               dotColorClass="bg-rose-400"
               value={props.destination}
               onSelect={(place) => props.onSelectDestination(place)}
+              onClear={() => props.onClearDestination()}
             />
+          </div>
+
+          <div class="flex items-center justify-between gap-2 pt-0.5">
+            <button
+              type="button"
+              onClick={() => props.onAddStop()}
+              disabled={props.stops.length >= 8}
+              class="flex items-center gap-1.5 rounded-lg border border-dashed border-slate-700 bg-slate-900/60 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-indigo-400/70 hover:bg-indigo-950/30 hover:text-indigo-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Plus class="h-3.5 w-3.5" />
+              Ajouter une étape
+            </button>
+
+            <button
+              type="button"
+              aria-label="Inverser départ et arrivée"
+              onClick={() => props.onSwapPlaces()}
+              disabled={!props.origin && !props.destination && props.stops.length === 0}
+              class="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-sky-500/60 hover:text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <ArrowUpDown class="h-3.5 w-3.5" />
+              Inverser
+            </button>
           </div>
 
           <div class="flex flex-wrap gap-1.5 pt-1">
@@ -205,6 +323,21 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
             </For>
           </div>
         </section>
+
+        <Show when={!props.origin || !props.destination}>
+          <div class="mt-4 rounded-2xl border border-slate-800/90 bg-slate-900/50 p-4 text-center">
+            <div class="mx-auto flex h-9 w-9 items-center justify-center rounded-xl bg-sky-500/15 text-sky-400">
+              <MapPin class="h-4.5 w-4.5" />
+            </div>
+            <p class="mt-2.5 text-xs font-semibold text-slate-200">
+              Planifiez votre trajet autoroutier
+            </p>
+            <p class="mt-1 text-[11px] leading-relaxed text-slate-400">
+              Saisissez un départ, une arrivée (et vos étapes si besoin) ou choisissez un trajet
+              rapide ci-dessus pour calculer et optimiser chaque section de péage.
+            </p>
+          </div>
+        </Show>
 
         <Show when={props.isLoadingRoute}>
           <div class="mt-4 flex items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900/60 py-6 text-xs text-slate-300">
@@ -404,6 +537,100 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                     </button>
                   </div>
                 </section>
+
+                <Show when={exportInput()}>
+                  {(payload) => {
+                    const waypoints = () => collectOrderedExportWaypoints(payload());
+                    const stopCount = () =>
+                      waypoints().filter((waypoint) => waypoint.kind === "stop").length;
+                    const splitExportCount = () =>
+                      waypoints().filter((waypoint) => waypoint.kind === "split").length;
+                    const exportSummaryLabel = () => {
+                      if (payload().avoidTolls) {
+                        return stopCount() > 0
+                          ? `Sans péage · ${stopCount()} étape${stopCount() > 1 ? "s" : ""}`
+                          : "Mode sans péage";
+                      }
+                      const parts: string[] = [];
+                      if (stopCount() > 0) {
+                        parts.push(`${stopCount()} étape${stopCount() > 1 ? "s" : ""}`);
+                      }
+                      if (splitExportCount() > 0) {
+                        parts.push(
+                          `${splitExportCount()} sortie${splitExportCount() > 1 ? "s" : ""} péage`,
+                        );
+                      }
+                      return parts.length > 0 ? `Inclut ${parts.join(" + ")}` : "Trajet direct";
+                    };
+
+                    return (
+                      <section class="space-y-2 rounded-2xl border border-slate-800/90 bg-slate-900/60 p-3">
+                        <div class="flex items-center justify-between gap-2">
+                          <div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-300">
+                            <Navigation class="h-3.5 w-3.5 text-sky-400" />
+                            Exporter l’itinéraire
+                          </div>
+                          <span class="text-[10px] font-medium text-slate-400">
+                            {exportSummaryLabel()}
+                          </span>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-1.5">
+                          <a
+                            href={buildGoogleMapsUrl(payload())}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="flex items-center justify-between rounded-xl border border-slate-700/80 bg-slate-950/80 px-2.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-sky-500/60 hover:bg-slate-900 hover:text-white"
+                          >
+                            <span>Google Maps</span>
+                            <ExternalLink class="h-3.5 w-3.5 text-sky-400" />
+                          </a>
+
+                          <a
+                            href={buildAppleMapsUrl(payload())}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="flex items-center justify-between rounded-xl border border-slate-700/80 bg-slate-950/80 px-2.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-sky-500/60 hover:bg-slate-900 hover:text-white"
+                          >
+                            <span>Apple Plans</span>
+                            <ExternalLink class="h-3.5 w-3.5 text-slate-300" />
+                          </a>
+
+                          <a
+                            href={buildWazeUrl(payload())}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={
+                              waypoints().length > 0
+                                ? "Waze ouvre uniquement la destination finale via lien web"
+                                : "Ouvrir la navigation dans Waze"
+                            }
+                            class="flex items-center justify-between rounded-xl border border-slate-700/80 bg-slate-950/80 px-2.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-cyan-500/60 hover:bg-slate-900 hover:text-white"
+                          >
+                            <span>Waze</span>
+                            <ExternalLink class="h-3.5 w-3.5 text-cyan-400" />
+                          </a>
+
+                          <button
+                            type="button"
+                            onClick={() => downloadGpxFile(payload())}
+                            class="flex items-center justify-between rounded-xl border border-emerald-500/40 bg-emerald-950/35 px-2.5 py-2 text-xs font-medium text-emerald-200 transition-colors hover:border-emerald-400/70 hover:bg-emerald-900/40 hover:text-white"
+                          >
+                            <span>Fichier GPX</span>
+                            <Download class="h-3.5 w-3.5 text-emerald-400" />
+                          </button>
+                        </div>
+
+                        <Show when={waypoints().length > 0}>
+                          <p class="text-[10px] text-slate-500">
+                            Google Maps, Apple Plans et GPX incluent vos étapes et sorties péage.
+                            Waze n’accepte que la destination via lien.
+                          </p>
+                        </Show>
+                      </section>
+                    );
+                  }}
+                </Show>
 
                 <section class="space-y-2.5">
                   <div class="flex items-center justify-between">

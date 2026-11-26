@@ -1,7 +1,7 @@
 import { createQuery } from "@tanstack/solid-query";
 import { createFileRoute } from "@tanstack/solid-router";
 import { createEffect, createMemo, createSignal, onMount } from "solid-js";
-import { RouteSidebar } from "~/components/route-sidebar";
+import { RouteSidebar, type RouteStopItem } from "~/components/route-sidebar";
 import { TollMap } from "~/components/toll-map";
 import { evaluateRouteTolls, optimizeTollSplits } from "~/domain/toll-calculator";
 import {
@@ -11,10 +11,7 @@ import {
   type TollDataset,
   type VehicleClass,
 } from "~/domain/toll-types";
-import { PRESET_TRIPS } from "~/lib/format";
 import { computeDualRoutes } from "~/server/routing";
-
-const defaultPreset = PRESET_TRIPS[1] ?? PRESET_TRIPS[0];
 
 const fetchTollDataset = async (): Promise<TollDataset> => {
   const response = await fetch("/data/tolls-fr-2026.json");
@@ -25,12 +22,13 @@ const fetchTollDataset = async (): Promise<TollDataset> => {
   return TollDatasetSchema.parse(json);
 };
 
+let stopIdCounter = 0;
+
 const HomePage = () => {
   const [hydrated, setHydrated] = createSignal(false);
-  const [origin, setOrigin] = createSignal<PlaceSuggestion | null>(defaultPreset?.origin ?? null);
-  const [destination, setDestination] = createSignal<PlaceSuggestion | null>(
-    defaultPreset?.destination ?? null,
-  );
+  const [origin, setOrigin] = createSignal<PlaceSuggestion | null>(null);
+  const [destination, setDestination] = createSignal<PlaceSuggestion | null>(null);
+  const [stops, setStops] = createSignal<RouteStopItem[]>([]);
   const [vehicleClass, setVehicleClass] = createSignal<VehicleClass>("c1");
   const [splitPlazaIds, setSplitPlazaIds] = createSignal<Set<string>>(new Set());
   const [bypassedSectionIds, setBypassedSectionIds] = createSignal<Set<string>>(new Set());
@@ -46,6 +44,12 @@ const HomePage = () => {
     setHydrated(true);
   });
 
+  const activeStops = createMemo<PlaceSuggestion[]>(() =>
+    stops()
+      .map((stop) => stop.place)
+      .filter((place): place is PlaceSuggestion => place !== null),
+  );
+
   const datasetQuery = createQuery(() => ({
     queryKey: ["toll-dataset", "fr-2026"],
     queryFn: fetchTollDataset,
@@ -56,8 +60,11 @@ const HomePage = () => {
   const routeQuery = createQuery(() => {
     const from = origin();
     const to = destination();
+    const waypoints = activeStops().map((stop) => ({ lon: stop.lon, lat: stop.lat }));
+    const waypointsKey = waypoints.map((wp) => `${wp.lon},${wp.lat}`).join(";");
+
     return {
-      queryKey: ["dual-routes", from?.lon, from?.lat, to?.lon, to?.lat],
+      queryKey: ["dual-routes", from?.lon, from?.lat, waypointsKey, to?.lon, to?.lat],
       queryFn: () => {
         if (!from || !to) {
           throw new Error("Sélectionnez un départ et une arrivée");
@@ -66,6 +73,7 @@ const HomePage = () => {
           data: {
             origin: { lon: from.lon, lat: from.lat },
             destination: { lon: to.lon, lat: to.lat },
+            waypoints,
           },
         });
       },
@@ -77,7 +85,10 @@ const HomePage = () => {
   createEffect(() => {
     const _from = origin();
     const _to = destination();
-    if (_from || _to) {
+    const _stopsKey = activeStops()
+      .map((stop) => `${stop.lon},${stop.lat}`)
+      .join(";");
+    if (_from || _to || _stopsKey.length > 0) {
       setSplitPlazaIds(new Set<string>());
       setBypassedSectionIds(new Set<string>());
       setSelectedSectionId(null);
@@ -90,7 +101,8 @@ const HomePage = () => {
   };
 
   const dataset = () => (datasetQuery.isSuccess ? datasetQuery.data : null);
-  const routeData = () => (routeQuery.isSuccess ? routeQuery.data : null);
+  const routeData = () =>
+    routeQuery.isSuccess && origin() && destination() ? routeQuery.data : null;
 
   const summary = createMemo(() => {
     const ds = dataset();
@@ -116,6 +128,40 @@ const HomePage = () => {
       maxAddedMinutes: maxAddedMinutes(),
     });
   });
+
+  const handleAddStop = () => {
+    if (stops().length >= 8) return;
+    stopIdCounter += 1;
+    setStops((prev) => [...prev, { id: `stop-${stopIdCounter}`, place: null }]);
+  };
+
+  const handleSelectStop = (stopId: string, place: PlaceSuggestion) => {
+    setStops((prev) => prev.map((stop) => (stop.id === stopId ? { ...stop, place } : stop)));
+  };
+
+  const handleClearStop = (stopId: string) => {
+    setStops((prev) => prev.map((stop) => (stop.id === stopId ? { ...stop, place: null } : stop)));
+  };
+
+  const handleRemoveStop = (stopId: string) => {
+    setStops((prev) => prev.filter((stop) => stop.id !== stopId));
+  };
+
+  const handleMoveStop = (stopId: string, direction: "up" | "down") => {
+    setStops((prev) => {
+      const index = prev.findIndex((stop) => stop.id === stopId);
+      if (index === -1) return prev;
+      const targetIndex = direction === "up" ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+      const next = [...prev];
+      const current = next[index];
+      const target = next[targetIndex];
+      if (!current || !target) return prev;
+      next[index] = target;
+      next[targetIndex] = current;
+      return next;
+    });
+  };
 
   const handleToggleSplitPlaza = (plazaId: string) => {
     setSplitPlazaIds((prev) => {
@@ -158,6 +204,7 @@ const HomePage = () => {
     const currentDestination = destination();
     setOrigin(currentDestination);
     setDestination(currentOrigin);
+    setStops((prev) => [...prev].reverse());
   };
 
   const datasetStats = createMemo(() => {
@@ -176,12 +223,21 @@ const HomePage = () => {
         datasetStats={datasetStats()}
         origin={origin()}
         destination={destination()}
+        stops={stops()}
         onSelectOrigin={setOrigin}
+        onClearOrigin={() => setOrigin(null)}
         onSelectDestination={setDestination}
+        onClearDestination={() => setDestination(null)}
+        onAddStop={handleAddStop}
+        onSelectStop={handleSelectStop}
+        onClearStop={handleClearStop}
+        onRemoveStop={handleRemoveStop}
+        onMoveStop={handleMoveStop}
         onSwapPlaces={handleSwapPlaces}
         onSelectPreset={(from, to) => {
           setOrigin(from);
           setDestination(to);
+          setStops([]);
         }}
         vehicleClass={vehicleClass()}
         onChangeVehicleClass={handleVehicleClassChange}
@@ -222,6 +278,7 @@ const HomePage = () => {
         <TollMap
           origin={origin()}
           destination={destination()}
+          stops={activeStops()}
           highwayRoute={routeData()?.highway ?? null}
           tollFreeRoute={routeData()?.tollFree ?? null}
           showTollFree={showTollFree()}

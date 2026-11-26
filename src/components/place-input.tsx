@@ -8,8 +8,10 @@ interface PlaceInputProps {
   label: string;
   placeholder: string;
   dotColorClass: string;
+  badgeText?: string;
   value: PlaceSuggestion | null;
   onSelect: (place: PlaceSuggestion) => void;
+  onClear?: () => void;
 }
 
 export const PlaceInput = (props: PlaceInputProps) => {
@@ -19,9 +21,7 @@ export const PlaceInput = (props: PlaceInputProps) => {
 
   createEffect(() => {
     const selected = props.value;
-    if (selected) {
-      setInputText(selected.label);
-    }
+    setInputText(selected ? selected.label : "");
   });
 
   createEffect(() => {
@@ -52,7 +52,18 @@ export const PlaceInput = (props: PlaceInputProps) => {
   return (
     <div class="relative">
       <div class="group flex items-center gap-2.5 rounded-xl border border-slate-800 bg-slate-900/90 px-3 py-2 transition-colors focus-within:border-sky-500/70 focus-within:bg-slate-900">
-        <span class={`h-2.5 w-2.5 shrink-0 rounded-full ${props.dotColorClass}`} />
+        <Show
+          when={props.badgeText}
+          fallback={<span class={`h-2.5 w-2.5 shrink-0 rounded-full ${props.dotColorClass}`} />}
+        >
+          {(badge) => (
+            <span
+              class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white ${props.dotColorClass}`}
+            >
+              {badge()}
+            </span>
+          )}
+        </Show>
         <div class="min-w-0 flex-1">
           <div class="text-[10px] font-medium uppercase tracking-wider text-slate-500">
             {props.label}
@@ -83,6 +94,7 @@ export const PlaceInput = (props: PlaceInputProps) => {
             onClick={() => {
               setInputText("");
               setDebouncedQuery("");
+              props.onClear?.();
               setIsOpen(true);
             }}
             class="rounded-md p-1 text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-200"

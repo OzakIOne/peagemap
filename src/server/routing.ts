@@ -77,15 +77,15 @@ export const searchPlaces = createServerFn({ method: "GET" })
     return suggestions;
   });
 
+const CoordinatePointSchema = z.object({
+  lon: z.number(),
+  lat: z.number(),
+});
+
 const RouteRequestSchema = z.object({
-  origin: z.object({
-    lon: z.number(),
-    lat: z.number(),
-  }),
-  destination: z.object({
-    lon: z.number(),
-    lat: z.number(),
-  }),
+  origin: CoordinatePointSchema,
+  destination: CoordinatePointSchema,
+  waypoints: z.array(CoordinatePointSchema).max(10).default([]),
 });
 
 const OsrmRouteSchema = z.object({
@@ -102,12 +102,11 @@ const OsrmResponseSchema = z.object({
 });
 
 const fetchOsrmSingle = async (params: {
-  origin: { lon: number; lat: number };
-  destination: { lon: number; lat: number };
+  points: Array<{ lon: number; lat: number }>;
   excludeToll: boolean;
 }): Promise<RouteGeometry | null> => {
-  const { origin, destination, excludeToll } = params;
-  const coords = `${origin.lon},${origin.lat};${destination.lon},${destination.lat}`;
+  const { points, excludeToll } = params;
+  const coords = points.map((point) => `${point.lon},${point.lat}`).join(";");
   const url = new URL(`https://router.project-osrm.org/route/v1/driving/${coords}`);
   url.searchParams.set("overview", "full");
   url.searchParams.set("geometries", "geojson");
@@ -182,10 +181,9 @@ const decodePolyline6 = (encoded: string): Array<[number, number]> => {
 };
 
 const fetchValhallaTollFree = async (params: {
-  origin: { lon: number; lat: number };
-  destination: { lon: number; lat: number };
+  points: Array<{ lon: number; lat: number }>;
 }): Promise<RouteGeometry | null> => {
-  const { origin, destination } = params;
+  const { points } = params;
   try {
     const response = await fetch("https://valhalla1.openstreetmap.de/route", {
       method: "POST",
@@ -194,10 +192,7 @@ const fetchValhallaTollFree = async (params: {
         "User-Agent": "PeageMap/1.0 (https://github.com/OzakIOne/peagemap)",
       },
       body: JSON.stringify({
-        locations: [
-          { lat: origin.lat, lon: origin.lon },
-          { lat: destination.lat, lon: destination.lon },
-        ],
+        locations: points.map((point) => ({ lat: point.lat, lon: point.lon })),
         costing: "auto",
         costing_options: {
           auto: {
@@ -236,15 +231,14 @@ export interface DualRouteResponse {
 export const computeDualRoutes = createServerFn({ method: "GET" })
   .validator((input: unknown) => RouteRequestSchema.parse(input))
   .handler(async ({ data }): Promise<DualRouteResponse> => {
+    const points = [data.origin, ...data.waypoints, data.destination];
     const [highway, tollFree] = await Promise.all([
       fetchOsrmSingle({
-        origin: data.origin,
-        destination: data.destination,
+        points,
         excludeToll: false,
       }),
       fetchValhallaTollFree({
-        origin: data.origin,
-        destination: data.destination,
+        points,
       }),
     ]);
 

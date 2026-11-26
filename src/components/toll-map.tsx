@@ -30,6 +30,7 @@ const LIGHT_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 interface TollMapProps {
   origin: PlaceSuggestion | null;
   destination: PlaceSuggestion | null;
+  stops: PlaceSuggestion[];
   highwayRoute: RouteGeometry | null;
   tollFreeRoute: RouteGeometry | null;
   showTollFree: boolean;
@@ -245,6 +246,17 @@ export const TollMap = (props: TollMapProps) => {
       );
     }
 
+    for (let index = 0; index < props.stops.length; index += 1) {
+      const stop = props.stops[index];
+      if (!stop) continue;
+      const el = document.createElement("div");
+      el.className =
+        "flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-indigo-500 text-[11px] font-bold text-white shadow-lg";
+      el.textContent = String(index + 1);
+      el.title = `Étape ${index + 1} : ${stop.label}`;
+      activeMarkers.push(new ml.Marker({ element: el }).setLngLat([stop.lon, stop.lat]).addTo(map));
+    }
+
     if (props.destination) {
       const el = document.createElement("div");
       el.className =
@@ -324,7 +336,8 @@ export const TollMap = (props: TollMapProps) => {
       }
     }
 
-    const fitKey = `${props.origin?.lon ?? ""},${props.origin?.lat ?? ""}|${props.destination?.lon ?? ""},${props.destination?.lat ?? ""}|${props.highwayRoute?.distanceMeters ?? 0}`;
+    const stopsKey = props.stops.map((stop) => `${stop.lon},${stop.lat}`).join(";");
+    const fitKey = `${props.origin?.lon ?? ""},${props.origin?.lat ?? ""}|${stopsKey}|${props.destination?.lon ?? ""},${props.destination?.lat ?? ""}|${props.highwayRoute?.distanceMeters ?? 0}`;
     if (
       props.highwayRoute &&
       props.highwayRoute.coordinates.length > 1 &&
