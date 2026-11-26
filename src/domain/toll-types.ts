@@ -122,10 +122,16 @@ export interface PricedTollSection {
   basePriceEur: number | null;
   effectivePriceEur: number;
   isBypassed: boolean;
+  bypassRole?: "manual" | "before-entry" | "after-exit";
   isSplitStart: boolean;
   isSplitEnd: boolean;
   bypassExtraMinutes: number;
   coordinates: Array<[number, number]>;
+}
+
+export interface RunEntryExitOverride {
+  entryPlazaId?: string;
+  exitPlazaId?: string;
 }
 
 export interface PricedRouteSummary {

@@ -9,6 +9,7 @@ import {
   VEHICLE_CLASS_META,
   type BypassDetour,
   type PlaceSuggestion,
+  type RunEntryExitOverride,
   type TollDataset,
   type VehicleClass,
 } from "~/domain/toll-types";
@@ -33,6 +34,7 @@ const HomePage = () => {
   const [vehicleClass, setVehicleClass] = createSignal<VehicleClass>("c1");
   const [splitPlazaIds, setSplitPlazaIds] = createSignal<Set<string>>(new Set());
   const [bypassedSectionIds, setBypassedSectionIds] = createSignal<Set<string>>(new Set());
+  const [runOverrides, setRunOverrides] = createSignal<Record<string, RunEntryExitOverride>>({});
   const [bypassDetours, setBypassDetours] = createSignal<Record<string, BypassDetour>>({});
   const [loadingBypassIds, setLoadingBypassIds] = createSignal<Set<string>>(new Set());
   const [maxAddedMinutes, setMaxAddedMinutes] = createSignal(12);
@@ -97,6 +99,7 @@ const HomePage = () => {
       routeGeneration += 1;
       setSplitPlazaIds(new Set<string>());
       setBypassedSectionIds(new Set<string>());
+      setRunOverrides({});
       setBypassDetours({});
       setLoadingBypassIds(new Set<string>());
       setSelectedSectionId(null);
@@ -122,6 +125,7 @@ const HomePage = () => {
       vehicleClass: vehicleClass(),
       splitPlazaIds: splitPlazaIds(),
       bypassedSectionIds: bypassedSectionIds(),
+      runOverrides: runOverrides(),
     });
   });
 
@@ -265,7 +269,74 @@ const HomePage = () => {
     });
   };
 
+  const handleSetRunEntry = (runId: string, plazaId: string | undefined) => {
+    const unit = summary()?.units.find((u) => u.id === runId && u.kind === "closed");
+    setRunOverrides((prev) => {
+      const current = prev[runId] ?? {};
+      let nextExit = current.exitPlazaId;
+      if (unit && unit.kind === "closed" && plazaId && nextExit) {
+        const entryIdx = unit.plazas.findIndex((p) => p.plaza.id === plazaId);
+        const exitIdx = unit.plazas.findIndex((p) => p.plaza.id === nextExit);
+        if (entryIdx >= exitIdx) {
+          nextExit = undefined;
+        }
+      }
+      const nextEntry =
+        unit && unit.kind === "closed" && plazaId === unit.plazas[0]?.plaza.id
+          ? undefined
+          : plazaId;
+      if (!nextEntry && !nextExit) {
+        const rest = { ...prev };
+        delete rest[runId];
+        return rest;
+      }
+      return { ...prev, [runId]: { entryPlazaId: nextEntry, exitPlazaId: nextExit } };
+    });
+  };
+
+  const handleSetRunExit = (runId: string, plazaId: string | undefined) => {
+    const unit = summary()?.units.find((u) => u.id === runId && u.kind === "closed");
+    setRunOverrides((prev) => {
+      const current = prev[runId] ?? {};
+      let nextEntry = current.entryPlazaId;
+      if (unit && unit.kind === "closed" && plazaId && nextEntry) {
+        const entryIdx = unit.plazas.findIndex((p) => p.plaza.id === nextEntry);
+        const exitIdx = unit.plazas.findIndex((p) => p.plaza.id === plazaId);
+        if (exitIdx <= entryIdx) {
+          nextEntry = undefined;
+        }
+      }
+      const lastId =
+        unit && unit.kind === "closed" ? unit.plazas[unit.plazas.length - 1]?.plaza.id : undefined;
+      const nextExit = plazaId === lastId ? undefined : plazaId;
+      if (!nextEntry && !nextExit) {
+        const rest = { ...prev };
+        delete rest[runId];
+        return rest;
+      }
+      return { ...prev, [runId]: { entryPlazaId: nextEntry, exitPlazaId: nextExit } };
+    });
+  };
+
+  const handleResetRunOverride = (runId: string) => {
+    setRunOverrides((prev) => {
+      if (!prev[runId]) return prev;
+      const next = { ...prev };
+      delete next[runId];
+      return next;
+    });
+  };
+
   const handleToggleBypassSection = (sectionId: string) => {
+    const section = summary()?.sections.find((item) => item.id === sectionId);
+    if (section?.bypassRole === "before-entry") {
+      handleSetRunEntry(section.runId, undefined);
+      return;
+    }
+    if (section?.bypassRole === "after-exit") {
+      handleSetRunExit(section.runId, undefined);
+      return;
+    }
     setBypassedSectionIds((prev) => {
       const next = new Set(prev);
       if (next.has(sectionId)) {
@@ -281,12 +352,14 @@ const HomePage = () => {
     const opt = optimization();
     if (!opt) return;
     setBypassedSectionIds(new Set<string>());
+    setRunOverrides({});
     setSplitPlazaIds(new Set(opt.splitPlazaIds));
   };
 
   const handleResetCustomizations = () => {
     setSplitPlazaIds(new Set<string>());
     setBypassedSectionIds(new Set<string>());
+    setRunOverrides({});
   };
 
   const handleSwapPlaces = () => {
@@ -349,6 +422,10 @@ const HomePage = () => {
         showTollFree={showTollFree()}
         onToggleShowTollFree={() => setShowTollFree((v) => !v)}
         summary={summary()}
+        runOverrides={runOverrides()}
+        onSetRunEntry={handleSetRunEntry}
+        onSetRunExit={handleSetRunExit}
+        onResetRunOverride={handleResetRunOverride}
         bypassDetours={bypassDetours()}
         loadingBypassIds={loadingBypassIds()}
         optimization={optimization()}
@@ -377,6 +454,9 @@ const HomePage = () => {
           showTollFree={showTollFree()}
           units={summary()?.units ?? []}
           sections={summary()?.sections ?? []}
+          runOverrides={runOverrides()}
+          onSetRunEntry={handleSetRunEntry}
+          onSetRunExit={handleSetRunExit}
           bypassDetours={bypassDetours()}
           loadingBypassIds={loadingBypassIds()}
           splitPlazaIds={splitPlazaIds()}

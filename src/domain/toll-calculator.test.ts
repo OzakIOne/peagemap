@@ -227,4 +227,42 @@ describe("toll-calculator", () => {
     expect(insights[0]?.savingsEur).toBe(2.7);
     expect(insights[0]?.savingsPerHourEur).toBe(40.5);
   });
+
+  it("supports custom highway entry and exit overrides with automatic before/after bypasses", () => {
+    const base = evaluateRouteTolls({
+      dataset: sampleDataset,
+      coordinates: sampleRoute,
+      vehicleClass: "c1",
+      splitPlazaIds: new Set(),
+      bypassedSectionIds: new Set(),
+    });
+    const runId = base.units[0]?.id ?? "";
+
+    const trimmed = evaluateRouteTolls({
+      dataset: sampleDataset,
+      coordinates: sampleRoute,
+      vehicleClass: "c1",
+      splitPlazaIds: new Set(),
+      bypassedSectionIds: new Set(),
+      runOverrides: {
+        [runId]: {
+          entryPlazaId: "aprr:auxerre-sud",
+          exitPlazaId: "aprr:beaune",
+        },
+      },
+    });
+
+    const closedSections = trimmed.sections.filter((section) => section.runId === runId);
+    expect(closedSections).toHaveLength(3);
+    expect(closedSections[0]?.isBypassed).toBe(true);
+    expect(closedSections[0]?.bypassRole).toBe("before-entry");
+    expect(closedSections[1]?.isBypassed).toBe(false);
+    expect(closedSections[1]?.fromPlaza.plaza.id).toBe("aprr:auxerre-sud");
+    expect(closedSections[1]?.toPlaza.plaza.id).toBe("aprr:beaune");
+    expect(closedSections[1]?.effectivePriceEur).toBe(10.1);
+    expect(closedSections[2]?.isBypassed).toBe(true);
+    expect(closedSections[2]?.bypassRole).toBe("after-exit");
+    expect(trimmed.splitCount).toBe(0);
+    expect(trimmed.currentTollEur).toBe(13.5);
+  });
 });

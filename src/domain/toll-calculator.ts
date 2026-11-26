@@ -6,6 +6,7 @@ import type {
   OptimizationResult,
   PricedRouteSummary,
   PricedTollSection,
+  RunEntryExitOverride,
   SplitCandidateInsight,
   TollDataset,
   TollPlaza,
@@ -228,16 +229,50 @@ const trimRunToValidEndpoints = (params: {
   };
 };
 
+export const resolveRunEntryExitIndices = (params: {
+  run: ClosedTollRun;
+  override?: RunEntryExitOverride;
+}): { entryIdx: number; exitIdx: number } => {
+  const { run, override } = params;
+  const lastIdx = Math.max(0, run.plazas.length - 1);
+  let entryIdx = 0;
+  let exitIdx = lastIdx;
+
+  if (override?.entryPlazaId) {
+    const found = run.plazas.findIndex((item) => item.plaza.id === override.entryPlazaId);
+    if (found >= 0 && found < lastIdx) {
+      entryIdx = found;
+    }
+  }
+
+  if (override?.exitPlazaId) {
+    const found = run.plazas.findIndex((item) => item.plaza.id === override.exitPlazaId);
+    if (found > entryIdx && found <= lastIdx) {
+      exitIdx = found;
+    }
+  }
+
+  return { entryIdx, exitIdx };
+};
+
 export const evaluateRouteTolls = (params: {
   dataset: TollDataset;
   coordinates: Array<[number, number]>;
   vehicleClass: VehicleClass;
   splitPlazaIds: ReadonlySet<string>;
   bypassedSectionIds: ReadonlySet<string>;
+  runOverrides?: Readonly<Record<string, RunEntryExitOverride>>;
   corridorKm?: number;
 }): PricedRouteSummary => {
-  const { dataset, coordinates, vehicleClass, splitPlazaIds, bypassedSectionIds, corridorKm } =
-    params;
+  const {
+    dataset,
+    coordinates,
+    vehicleClass,
+    splitPlazaIds,
+    bypassedSectionIds,
+    runOverrides,
+    corridorKm,
+  } = params;
 
   const matchedPlazas = matchPlazasToRoute({
     coordinates,
@@ -322,8 +357,56 @@ export const evaluateRouteTolls = (params: {
       directTollEur += directRunPrice;
     }
 
-    const activeStopIndices: number[] = [0];
-    for (let i = 1; i < unit.plazas.length - 1; i += 1) {
+    const { entryIdx, exitIdx } = resolveRunEntryExitIndices({
+      run: unit,
+      override: runOverrides?.[unit.id],
+    });
+    const entryPlaza = unit.plazas[entryIdx];
+    const exitPlaza = unit.plazas[exitIdx];
+    if (!entryPlaza || !exitPlaza) continue;
+
+    if (entryIdx > 0) {
+      const prePrice = lookupTariffEur({
+        dataset,
+        fromId: firstPlaza.plaza.id,
+        toId: entryPlaza.plaza.id,
+        vehicleClass,
+      });
+      const preDistanceKm = Math.max(
+        0,
+        roundEur(entryPlaza.distanceAlongRouteKm - firstPlaza.distanceAlongRouteKm),
+      );
+      const preBypassMinutes = estimateBypassExtraMinutes(preDistanceKm, false);
+      bypassCount += 1;
+      addedMinutes += preBypassMinutes;
+      addedDistanceKm += roundEur(preDistanceKm * 0.12);
+
+      sections.push({
+        id: `sec:${unit.id}:pre:${firstPlaza.plaza.id}->${entryPlaza.plaza.id}`,
+        runId: unit.id,
+        kind: "closed",
+        concessionaire: unit.concessionaire,
+        highway: firstPlaza.plaza.highway,
+        fromPlaza: firstPlaza,
+        toPlaza: entryPlaza,
+        distanceKm: preDistanceKm,
+        basePriceEur: prePrice,
+        effectivePriceEur: 0,
+        isBypassed: true,
+        bypassRole: "before-entry",
+        isSplitStart: false,
+        isSplitEnd: false,
+        bypassExtraMinutes: preBypassMinutes,
+        coordinates: sliceRouteCoordinates(
+          coordinates,
+          firstPlaza.routeCoordIndex,
+          entryPlaza.routeCoordIndex,
+        ),
+      });
+    }
+
+    const activeStopIndices: number[] = [entryIdx];
+    for (let i = entryIdx + 1; i < exitIdx; i += 1) {
       const candidate = unit.plazas[i];
       if (candidate && splitPlazaIds.has(candidate.plaza.id)) {
         activeStopIndices.push(i);
@@ -332,7 +415,7 @@ export const evaluateRouteTolls = (params: {
         addedDistanceKm += SPLIT_EXTRA_KM;
       }
     }
-    activeStopIndices.push(unit.plazas.length - 1);
+    activeStopIndices.push(exitIdx);
 
     for (let s = 0; s < activeStopIndices.length - 1; s += 1) {
       const fromIdx = activeStopIndices[s];
@@ -381,6 +464,7 @@ export const evaluateRouteTolls = (params: {
         basePriceEur: basePrice,
         effectivePriceEur: roundEur(effectivePrice),
         isBypassed,
+        bypassRole: isBypassed ? "manual" : undefined,
         isSplitStart: s > 0,
         isSplitEnd: s < activeStopIndices.length - 2,
         bypassExtraMinutes: bypassMinutes,
@@ -388,6 +472,46 @@ export const evaluateRouteTolls = (params: {
           coordinates,
           fromPlaza.routeCoordIndex,
           toPlaza.routeCoordIndex,
+        ),
+      });
+    }
+
+    if (exitIdx < unit.plazas.length - 1) {
+      const postPrice = lookupTariffEur({
+        dataset,
+        fromId: exitPlaza.plaza.id,
+        toId: lastPlaza.plaza.id,
+        vehicleClass,
+      });
+      const postDistanceKm = Math.max(
+        0,
+        roundEur(lastPlaza.distanceAlongRouteKm - exitPlaza.distanceAlongRouteKm),
+      );
+      const postBypassMinutes = estimateBypassExtraMinutes(postDistanceKm, false);
+      bypassCount += 1;
+      addedMinutes += postBypassMinutes;
+      addedDistanceKm += roundEur(postDistanceKm * 0.12);
+
+      sections.push({
+        id: `sec:${unit.id}:post:${exitPlaza.plaza.id}->${lastPlaza.plaza.id}`,
+        runId: unit.id,
+        kind: "closed",
+        concessionaire: unit.concessionaire,
+        highway: exitPlaza.plaza.highway,
+        fromPlaza: exitPlaza,
+        toPlaza: lastPlaza,
+        distanceKm: postDistanceKm,
+        basePriceEur: postPrice,
+        effectivePriceEur: 0,
+        isBypassed: true,
+        bypassRole: "after-exit",
+        isSplitStart: false,
+        isSplitEnd: false,
+        bypassExtraMinutes: postBypassMinutes,
+        coordinates: sliceRouteCoordinates(
+          coordinates,
+          exitPlaza.routeCoordIndex,
+          lastPlaza.routeCoordIndex,
         ),
       });
     }
@@ -637,30 +761,31 @@ export const evaluateIntermediateSplitCandidates = (params: {
   run: ClosedTollRun;
   vehicleClass: VehicleClass;
   splitPlazaIds: ReadonlySet<string>;
+  override?: RunEntryExitOverride;
 }): SplitCandidateInsight[] => {
-  const { dataset, run, vehicleClass, splitPlazaIds } = params;
-  const totalPlazas = run.plazas.length;
-  if (totalPlazas < 3) return [];
+  const { dataset, run, vehicleClass, splitPlazaIds, override } = params;
+  const { entryIdx, exitIdx } = resolveRunEntryExitIndices({ run, override });
+  if (exitIdx - entryIdx < 2) return [];
 
-  const activeIndices: number[] = [0];
-  for (let i = 1; i < totalPlazas - 1; i += 1) {
+  const activeIndices: number[] = [entryIdx];
+  for (let i = entryIdx + 1; i < exitIdx; i += 1) {
     const candidate = run.plazas[i];
     if (candidate && splitPlazaIds.has(candidate.plaza.id)) {
       activeIndices.push(i);
     }
   }
-  activeIndices.push(totalPlazas - 1);
+  activeIndices.push(exitIdx);
 
   const insights: SplitCandidateInsight[] = [];
 
-  for (let i = 1; i < totalPlazas - 1; i += 1) {
+  for (let i = entryIdx + 1; i < exitIdx; i += 1) {
     const matched = run.plazas[i];
     if (!matched) continue;
 
     const isActive = splitPlazaIds.has(matched.plaza.id);
 
-    let prevIdx = 0;
-    let nextIdx = totalPlazas - 1;
+    let prevIdx = entryIdx;
+    let nextIdx = exitIdx;
     for (const boundaryIdx of activeIndices) {
       if (boundaryIdx < i) {
         prevIdx = boundaryIdx;

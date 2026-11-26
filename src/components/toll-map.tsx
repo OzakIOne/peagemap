@@ -2,12 +2,14 @@ import { Moon, Sun } from "lucide-solid";
 import type * as maplibregl from "maplibre-gl";
 import maplibreWorkerCode from "maplibre-gl/dist/maplibre-gl-worker.mjs?raw";
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { resolveRunEntryExitIndices } from "~/domain/toll-calculator";
 import type {
   BypassDetour,
   MatchedTollUnit,
   PlaceSuggestion,
   PricedTollSection,
   RouteGeometry,
+  RunEntryExitOverride,
 } from "~/domain/toll-types";
 import { formatEur } from "~/lib/format";
 
@@ -37,6 +39,9 @@ interface TollMapProps {
   showTollFree: boolean;
   units: MatchedTollUnit[];
   sections: PricedTollSection[];
+  runOverrides: Readonly<Record<string, RunEntryExitOverride>>;
+  onSetRunEntry: (runId: string, plazaId: string | undefined) => void;
+  onSetRunExit: (runId: string, plazaId: string | undefined) => void;
   bypassDetours: Readonly<Record<string, BypassDetour>>;
   loadingBypassIds: ReadonlySet<string>;
   splitPlazaIds: ReadonlySet<string>;
@@ -67,12 +72,15 @@ export const TollMap = (props: TollMapProps) => {
   let mapInstance: maplibregl.Map | null = null;
   let maplibreModule: typeof maplibregl | null = null;
   let activeMarkers: maplibregl.Marker[] = [];
+  let activePopup: maplibregl.Popup | null = null;
   let lastFittedKey = "";
 
   const [mapReady, setMapReady] = createSignal(false);
   const [darkStyle, setDarkStyle] = createSignal(true);
 
   const clearMarkers = () => {
+    activePopup?.remove();
+    activePopup = null;
     for (const marker of activeMarkers) {
       marker.remove();
     }
@@ -370,30 +378,104 @@ export const TollMap = (props: TollMapProps) => {
 
     for (const unit of props.units) {
       if (unit.kind === "open") continue;
+      const { entryIdx, exitIdx } = resolveRunEntryExitIndices({
+        run: unit,
+        override: props.runOverrides[unit.id],
+      });
+
       for (let i = 0; i < unit.plazas.length; i += 1) {
         const matched = unit.plazas[i];
         if (!matched) continue;
-        const isEndpoint = i === 0 || i === unit.plazas.length - 1;
-        const isSplit = props.splitPlazaIds.has(matched.plaza.id);
+        const isEntry = i === entryIdx;
+        const isExit = i === exitIdx;
+        const isOutside = i < entryIdx || i > exitIdx;
+        const isInside = i > entryIdx && i < exitIdx;
+        const isSplit = isInside && props.splitPlazaIds.has(matched.plaza.id);
 
         const dot = document.createElement("button");
         dot.type = "button";
-        if (isEndpoint) {
-          dot.className = "h-3.5 w-3.5 rounded-full border-2 border-white bg-sky-500 shadow-md";
-          dot.title = `${i === 0 ? "Entrée" : "Sortie"} : ${matched.plaza.name} (${matched.plaza.highway})`;
+        if (isEntry || isExit) {
+          dot.className =
+            "h-4 w-4 cursor-pointer rounded-full border-2 border-white bg-sky-500 shadow-lg transition-transform hover:scale-125";
+          dot.title = `${isEntry ? "Entrée autoroute" : "Sortie autoroute"} : ${matched.plaza.name} (${matched.plaza.highway})`;
+        } else if (isSplit) {
+          dot.className =
+            "flex h-5 w-5 cursor-pointer items-center justify-center rounded-full border-2 border-white bg-emerald-500 text-[10px] font-bold text-white shadow-lg transition-transform hover:scale-125";
+          dot.textContent = "✂";
+          dot.title = `${matched.plaza.name} (${matched.plaza.highway}) — Fractionnement actif`;
+        } else if (isOutside) {
+          dot.className =
+            "h-2.5 w-2.5 cursor-pointer rounded-full border border-amber-300/70 bg-amber-950/90 opacity-80 shadow transition-transform hover:scale-150 hover:bg-sky-400";
+          dot.title = `${matched.plaza.name} (${matched.plaza.highway}) — Hors péage (cliquer pour choisir)`;
         } else {
-          dot.className = isSplit
-            ? "flex h-5 w-5 cursor-pointer items-center justify-center rounded-full border-2 border-white bg-emerald-500 text-[10px] font-bold text-white shadow-lg transition-transform hover:scale-125"
-            : "h-3 w-3 cursor-pointer rounded-full border border-slate-200/80 bg-slate-900/90 shadow-md transition-transform hover:scale-150 hover:bg-emerald-400";
-          dot.textContent = isSplit ? "✂" : "";
-          dot.title = isSplit
-            ? `${matched.plaza.name} (${matched.plaza.highway}) — Fractionnement actif (cliquer pour annuler)`
-            : `${matched.plaza.name} (${matched.plaza.highway}) — Cliquer pour sortir & rerentrer (+4 min)`;
-          dot.addEventListener("click", (event) => {
-            event.stopPropagation();
-            props.onToggleSplitPlaza(matched.plaza.id);
-          });
+          dot.className =
+            "h-3 w-3 cursor-pointer rounded-full border border-slate-200/80 bg-slate-900/90 shadow-md transition-transform hover:scale-150 hover:bg-sky-400";
+          dot.title = `${matched.plaza.name} (${matched.plaza.highway}) — Cliquer pour entrer, sortir ou fractionner`;
         }
+
+        dot.addEventListener("click", (event) => {
+          event.stopPropagation();
+          activePopup?.remove();
+
+          const popupEl = document.createElement("div");
+          popupEl.className = "min-w-[205px] space-y-2 text-xs";
+
+          const header = document.createElement("div");
+          header.innerHTML = `<div class="font-semibold text-slate-100">${matched.plaza.name}</div><div class="text-[10px] text-slate-400">${matched.plaza.highway} · ${matched.plaza.concessionaire}${matched.plaza.exitNumber ? ` · Sortie n°${matched.plaza.exitNumber}` : ""}</div>`;
+          popupEl.append(header);
+
+          const actions = document.createElement("div");
+          actions.className = "flex flex-col gap-1";
+
+          const addActionBtn = (label: string, tone: string, onClick: () => void) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = `w-full cursor-pointer rounded-lg px-2.5 py-1.5 text-left text-[11px] font-semibold transition-colors ${tone}`;
+            btn.textContent = label;
+            btn.addEventListener("click", (btnEvent) => {
+              btnEvent.stopPropagation();
+              activePopup?.remove();
+              activePopup = null;
+              onClick();
+            });
+            actions.append(btn);
+          };
+
+          if (i < unit.plazas.length - 1 && !isEntry) {
+            addActionBtn(
+              i === 0 ? "Entrer dès le début" : "Entrer sur l’autoroute ici",
+              "bg-sky-500/20 text-sky-200 hover:bg-sky-500/35",
+              () => props.onSetRunEntry(unit.id, matched.plaza.id),
+            );
+          }
+
+          if (i > 0 && !isExit) {
+            addActionBtn(
+              i === unit.plazas.length - 1 ? "Sortir jusqu’à la fin" : "Sortir de l’autoroute ici",
+              "bg-amber-500/20 text-amber-200 hover:bg-amber-500/35",
+              () => props.onSetRunExit(unit.id, matched.plaza.id),
+            );
+          }
+
+          if (isInside) {
+            addActionBtn(
+              isSplit ? "Annuler le fractionnement (✂)" : "Fractionner ici (+4 min)",
+              "bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/35",
+              () => props.onToggleSplitPlaza(matched.plaza.id),
+            );
+          }
+
+          popupEl.append(actions);
+
+          activePopup = new ml.Popup({
+            closeButton: true,
+            closeOnClick: true,
+            offset: 12,
+          })
+            .setLngLat([matched.plaza.lon, matched.plaza.lat])
+            .setDOMContent(popupEl)
+            .addTo(map);
+        });
 
         activeMarkers.push(
           new ml.Marker({ element: dot, anchor: "center" })

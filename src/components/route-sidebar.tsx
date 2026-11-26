@@ -25,6 +25,7 @@ import {
   computeSectionHourlyRateEur,
   estimateFuelCostEur,
   evaluateIntermediateSplitCandidates,
+  resolveRunEntryExitIndices,
 } from "~/domain/toll-calculator";
 import {
   VEHICLE_CLASS_META,
@@ -34,6 +35,7 @@ import {
   type PlaceSuggestion,
   type PricedRouteSummary,
   type RouteGeometry,
+  type RunEntryExitOverride,
   type TollDataset,
   type VehicleClass,
 } from "~/domain/toll-types";
@@ -79,6 +81,10 @@ interface RouteSidebarProps {
   showTollFree: boolean;
   onToggleShowTollFree: () => void;
   summary: PricedRouteSummary | null;
+  runOverrides: Readonly<Record<string, RunEntryExitOverride>>;
+  onSetRunEntry: (runId: string, plazaId: string | undefined) => void;
+  onSetRunExit: (runId: string, plazaId: string | undefined) => void;
+  onResetRunOverride: (runId: string) => void;
   bypassDetours: Readonly<Record<string, BypassDetour>>;
   loadingBypassIds: ReadonlySet<string>;
   optimization: OptimizationResult | null;
@@ -686,10 +692,129 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                     <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
                       Sections de péage ({summary().sections.length})
                     </h2>
-                    <span class="text-[11px] text-slate-500">
-                      Cliquez une sortie sur la carte ou ici
-                    </span>
+                    <span class="text-[11px] text-slate-500">Choisissez où entrer / sortir</span>
                   </div>
+
+                  <Show when={closedRuns().length > 0}>
+                    <div class="space-y-2">
+                      <For each={closedRuns()}>
+                        {(run) => {
+                          const indices = () =>
+                            resolveRunEntryExitIndices({
+                              run,
+                              override: props.runOverrides[run.id],
+                            });
+                          const isCustom = () =>
+                            indices().entryIdx > 0 || indices().exitIdx < run.plazas.length - 1;
+                          const totalSpan = () => Math.max(1, run.plazas.length - 1);
+                          const prePct = () => (indices().entryIdx / totalSpan()) * 100;
+                          const activePct = () =>
+                            ((indices().exitIdx - indices().entryIdx) / totalSpan()) * 100;
+                          const postPct = () =>
+                            ((totalSpan() - indices().exitIdx) / totalSpan()) * 100;
+
+                          return (
+                            <Show when={run.plazas.length >= 3}>
+                              <div class="rounded-xl border border-slate-800/90 bg-slate-900/75 p-2.5">
+                                <div class="flex items-center justify-between gap-2">
+                                  <div class="text-[11px] font-semibold text-slate-200">
+                                    Portion autoroute · {run.concessionaire} (
+                                    {run.highways.join(" / ")})
+                                  </div>
+                                  <Show when={isCustom()}>
+                                    <button
+                                      type="button"
+                                      onClick={() => props.onResetRunOverride(run.id)}
+                                      class="text-[10px] font-semibold text-sky-400 hover:text-sky-300"
+                                    >
+                                      Toute l’autoroute
+                                    </button>
+                                  </Show>
+                                </div>
+
+                                <div class="mt-2 flex h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                                  <Show when={prePct() > 0}>
+                                    <div
+                                      style={{ width: `${prePct()}%` }}
+                                      class="bg-amber-400/80 transition-all"
+                                      title="Hors péage avant l'entrée choisie"
+                                    />
+                                  </Show>
+                                  <div
+                                    style={{ width: `${activePct()}%` }}
+                                    class="bg-sky-400 transition-all"
+                                    title="Portion sur autoroute"
+                                  />
+                                  <Show when={postPct() > 0}>
+                                    <div
+                                      style={{ width: `${postPct()}%` }}
+                                      class="bg-amber-400/80 transition-all"
+                                      title="Hors péage après la sortie choisie"
+                                    />
+                                  </Show>
+                                </div>
+
+                                <div class="mt-2 grid grid-cols-2 gap-2">
+                                  <label class="space-y-1">
+                                    <span class="block text-[10px] font-medium text-slate-400">
+                                      Entrer à
+                                    </span>
+                                    <select
+                                      aria-label={`Entrer sur ${run.concessionaire}`}
+                                      value={run.plazas[indices().entryIdx]?.plaza.id ?? ""}
+                                      onChange={(event) =>
+                                        props.onSetRunEntry(run.id, event.currentTarget.value)
+                                      }
+                                      class="w-full truncate rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] font-medium text-slate-100 focus:border-sky-500 focus:outline-none"
+                                    >
+                                      <For each={run.plazas.slice(0, indices().exitIdx)}>
+                                        {(item, idx) => (
+                                          <option value={item.plaza.id}>
+                                            {idx() === 0
+                                              ? `${item.plaza.name} (début)`
+                                              : `${item.plaza.name} (${item.plaza.highway})`}
+                                          </option>
+                                        )}
+                                      </For>
+                                    </select>
+                                  </label>
+
+                                  <label class="space-y-1">
+                                    <span class="block text-[10px] font-medium text-slate-400">
+                                      Sortir à
+                                    </span>
+                                    <select
+                                      aria-label={`Sortir de ${run.concessionaire}`}
+                                      value={run.plazas[indices().exitIdx]?.plaza.id ?? ""}
+                                      onChange={(event) =>
+                                        props.onSetRunExit(run.id, event.currentTarget.value)
+                                      }
+                                      class="w-full truncate rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] font-medium text-slate-100 focus:border-sky-500 focus:outline-none"
+                                    >
+                                      <For each={run.plazas.slice(indices().entryIdx + 1)}>
+                                        {(item, idx) => {
+                                          const isLast =
+                                            indices().entryIdx + 1 + idx() ===
+                                            run.plazas.length - 1;
+                                          return (
+                                            <option value={item.plaza.id}>
+                                              {isLast
+                                                ? `${item.plaza.name} (fin)`
+                                                : `${item.plaza.name} (${item.plaza.highway})`}
+                                            </option>
+                                          );
+                                        }}
+                                      </For>
+                                    </select>
+                                  </label>
+                                </div>
+                              </div>
+                            </Show>
+                          );
+                        }}
+                      </For>
+                    </div>
+                  </Show>
 
                   <Show
                     when={summary().sections.length > 0}
@@ -914,6 +1039,7 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                                 run,
                                 vehicleClass: props.vehicleClass,
                                 splitPlazaIds: props.splitPlazaIds,
+                                override: props.runOverrides[run.id],
                               })
                             : [];
                         const profitableCount = () =>
