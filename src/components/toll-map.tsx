@@ -392,24 +392,32 @@ export const TollMap = (props: TollMapProps) => {
         const isInside = i > entryIdx && i < exitIdx;
         const isSplit = isInside && props.splitPlazaIds.has(matched.plaza.id);
 
+        const isCustomEntry = isEntry && entryIdx > 0;
+        const isCustomExit = isExit && exitIdx < unit.plazas.length - 1;
+
         const dot = document.createElement("button");
         dot.type = "button";
-        if (isEntry || isExit) {
+        if (isCustomEntry || isCustomExit) {
+          dot.className =
+            "cursor-pointer whitespace-nowrap rounded-full border-2 border-white bg-sky-500 px-2 py-0.5 text-[10px] font-bold text-white shadow-xl transition-transform hover:scale-105";
+          dot.textContent = `${isCustomEntry ? "Entrée" : "Sortie"} · ${matched.plaza.name}`;
+          dot.title = `${isCustomEntry ? "Entrée autoroute choisie" : "Sortie autoroute choisie"} : ${matched.plaza.name} (${matched.plaza.highway})`;
+        } else if (isEntry || isExit) {
           dot.className =
             "h-4 w-4 cursor-pointer rounded-full border-2 border-white bg-sky-500 shadow-lg transition-transform hover:scale-125";
           dot.title = `${isEntry ? "Entrée autoroute" : "Sortie autoroute"} : ${matched.plaza.name} (${matched.plaza.highway})`;
         } else if (isSplit) {
           dot.className =
-            "flex h-5 w-5 cursor-pointer items-center justify-center rounded-full border-2 border-white bg-emerald-500 text-[10px] font-bold text-white shadow-lg transition-transform hover:scale-125";
-          dot.textContent = "✂";
-          dot.title = `${matched.plaza.name} (${matched.plaza.highway}) — Fractionnement actif`;
+            "flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-full border-2 border-white bg-emerald-500 px-2 py-0.5 text-[10px] font-bold text-slate-950 shadow-xl transition-transform hover:scale-105";
+          dot.textContent = `✂ ${matched.plaza.name}`;
+          dot.title = `${matched.plaza.name} (${matched.plaza.highway}) — Sortie intermédiaire active (cliquer pour modifier)`;
         } else if (isOutside) {
           dot.className =
             "h-2.5 w-2.5 cursor-pointer rounded-full border border-amber-300/70 bg-amber-950/90 opacity-80 shadow transition-transform hover:scale-150 hover:bg-sky-400";
           dot.title = `${matched.plaza.name} (${matched.plaza.highway}) — Hors péage (cliquer pour choisir)`;
         } else {
           dot.className =
-            "h-3 w-3 cursor-pointer rounded-full border border-slate-200/80 bg-slate-900/90 shadow-md transition-transform hover:scale-150 hover:bg-sky-400";
+            "h-3.5 w-3.5 cursor-pointer rounded-full border-2 border-slate-200/85 bg-slate-900/95 shadow-md transition-transform hover:scale-140 hover:border-emerald-300 hover:bg-emerald-500";
           dot.title = `${matched.plaza.name} (${matched.plaza.highway}) — Cliquer pour entrer, sortir ou fractionner`;
         }
 

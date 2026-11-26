@@ -5,7 +5,7 @@ import {
   ChevronUp,
   Download,
   ExternalLink,
-  Fuel,
+  Info,
   Loader2,
   MapPin,
   Navigation,
@@ -23,7 +23,6 @@ import {
   SPLIT_EXTRA_KM,
   SPLIT_EXTRA_MINUTES,
   computeSectionHourlyRateEur,
-  estimateFuelCostEur,
   evaluateIntermediateSplitCandidates,
   resolveRunEntryExitIndices,
 } from "~/domain/toll-calculator";
@@ -54,6 +53,24 @@ export interface RouteStopItem {
   id: string;
   place: PlaceSuggestion | null;
 }
+
+const InfoTooltip = (props: { text: string; label: string }) => (
+  <span class="group relative inline-flex items-center">
+    <button
+      type="button"
+      aria-label={props.label}
+      class="inline-flex h-4 w-4 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 focus:bg-slate-800 focus:text-slate-100 focus:outline-none"
+    >
+      <Info class="h-3.5 w-3.5" />
+    </button>
+    <span
+      role="tooltip"
+      class="pointer-events-none absolute left-1/2 top-full z-40 mt-1.5 w-60 -translate-x-1/2 rounded-xl border border-slate-700/90 bg-slate-950/98 px-2.5 py-2 text-[11px] font-normal normal-case leading-relaxed tracking-normal text-slate-200 opacity-0 shadow-2xl transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100"
+    >
+      {props.text}
+    </span>
+  </span>
+);
 
 interface RouteSidebarProps {
   dataset: TollDataset | null;
@@ -97,16 +114,11 @@ interface RouteSidebarProps {
   onToggleBypassSection: (sectionId: string) => void;
   selectedSectionId: string | null;
   onSelectSection: (sectionId: string) => void;
-  litersPer100Km: number;
-  onChangeLitersPer100Km: (value: number) => void;
-  fuelPricePerLiter: number;
-  onChangeFuelPricePerLiter: (value: number) => void;
 }
 
 export const RouteSidebar = (props: RouteSidebarProps) => {
   const [collapsedRunIds, setCollapsedRunIds] = createSignal<Set<string>>(new Set());
   const [onlyProfitableSplits, setOnlyProfitableSplits] = createSignal(true);
-  const [showFuelSettings, setShowFuelSettings] = createSignal(false);
 
   const toggleRunCollapsed = (runId: string) => {
     setCollapsedRunIds((prev) => {
@@ -151,29 +163,9 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
     return Math.round(total * 10) / 10;
   };
 
-  const directFuelEur = () =>
-    estimateFuelCostEur({
-      distanceKm: highwayKm(),
-      litersPer100Km: props.litersPer100Km,
-      fuelPricePerLiterEur: props.fuelPricePerLiter,
-    });
-
-  const currentFuelEur = () =>
-    estimateFuelCostEur({
-      distanceKm: Math.max(0, highwayKm() + effectiveAddedDistanceKm()),
-      litersPer100Km: props.litersPer100Km,
-      fuelPricePerLiterEur: props.fuelPricePerLiter,
-    });
-
   const tollFreeKm = () => (props.tollFreeRoute ? props.tollFreeRoute.distanceMeters / 1000 : 0);
   const tollFreeMinutes = () =>
     props.tollFreeRoute ? props.tollFreeRoute.durationSeconds / 60 : 0;
-  const tollFreeFuelEur = () =>
-    estimateFuelCostEur({
-      distanceKm: tollFreeKm(),
-      litersPer100Km: props.litersPer100Km,
-      fuelPricePerLiterEur: props.fuelPricePerLiter,
-    });
 
   const closedRuns = (): ClosedTollRun[] =>
     (props.summary?.units ?? []).filter((unit): unit is ClosedTollRun => unit.kind === "closed");
@@ -409,15 +401,14 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
             return (
               <div class="mt-4 space-y-4">
                 <section class="rounded-2xl border border-emerald-500/30 bg-gradient-to-b from-emerald-950/45 to-slate-900/80 p-3.5">
-                  <div class="flex items-start justify-between gap-2">
-                    <div>
-                      <div class="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
-                        <Sparkles class="h-3.5 w-3.5" />
-                        Auto-optimisation du fractionnement
-                      </div>
-                      <p class="mt-0.5 text-[11px] text-slate-400">
-                        Trouve les meilleures sorties/ré-entrées sur la matrice tarifaire.
-                      </p>
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
+                      <Sparkles class="h-3.5 w-3.5" />
+                      <span>Optimisation auto (sorties péage)</span>
+                      <InfoTooltip
+                        label="Explication de l'optimisation automatique"
+                        text="Cherche les meilleures sorties/ré-entrées sur l’autoroute pour payer moins de péage. Les +4 min par sortie sont une estimation moyenne à la volée (barrière + demi-tour)."
+                      />
                     </div>
                     <Show when={opt() && opt()!.savingsEur > 0}>
                       <span class="shrink-0 rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs font-bold text-emerald-300">
@@ -426,12 +417,12 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                     </Show>
                   </div>
 
-                  <div class="mt-3">
+                  <div class="mt-2.5">
                     <div class="flex items-center justify-between text-[11px]">
-                      <span class="text-slate-400">Temps supplémentaire accepté</span>
+                      <span class="text-slate-400">Détour max accepté (~4 min/sortie)</span>
                       <span class="font-semibold text-slate-200">
                         +{props.maxAddedMinutes} min (max{" "}
-                        {Math.floor(props.maxAddedMinutes / SPLIT_EXTRA_MINUTES)} sorties)
+                        {Math.floor(props.maxAddedMinutes / SPLIT_EXTRA_MINUTES)})
                       </span>
                     </div>
                     <input
@@ -452,13 +443,13 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                       when={opt() && opt()!.savingsEur > 0}
                       fallback={
                         <span class="text-[11px] text-slate-400">
-                          Aucun fractionnement rentable sur ce budget temps.
+                          Aucune sortie rentable pour ce temps max.
                         </span>
                       }
                     >
                       <div class="text-[11px] text-emerald-200/90">
                         <strong>{opt()!.splitPlazaIds.length}</strong> sortie
-                        {opt()!.splitPlazaIds.length > 1 ? "s" : ""} (+{opt()!.addedMinutes} min ·{" "}
+                        {opt()!.splitPlazaIds.length > 1 ? "s" : ""} (~+{opt()!.addedMinutes} min ·{" "}
                         <strong>{formatEur(opt()!.savingsPerHourEur)}/h</strong>)
                       </div>
                       <button
@@ -473,56 +464,9 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                 </section>
 
                 <section class="space-y-2">
-                  <div class="flex items-center justify-between">
-                    <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      Comparateur Direct / Optimisé / Sans péage
-                    </h2>
-                    <button
-                      type="button"
-                      onClick={() => setShowFuelSettings((v) => !v)}
-                      class="flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-200"
-                    >
-                      <Fuel class="h-3 w-3" />
-                      Carburant
-                    </button>
-                  </div>
-
-                  <Show when={showFuelSettings()}>
-                    <div class="grid grid-cols-2 gap-2 rounded-xl border border-slate-800 bg-slate-900/70 p-2.5 text-xs">
-                      <label class="space-y-1">
-                        <span class="text-[10px] text-slate-400">Conso (L/100 km)</span>
-                        <input
-                          type="number"
-                          step="0.5"
-                          min="1"
-                          max="25"
-                          value={props.litersPer100Km}
-                          onInput={(event) =>
-                            props.onChangeLitersPer100Km(
-                              Math.max(1, Number(event.currentTarget.value) || 6.5),
-                            )
-                          }
-                          class="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
-                        />
-                      </label>
-                      <label class="space-y-1">
-                        <span class="text-[10px] text-slate-400">Prix (€/L)</span>
-                        <input
-                          type="number"
-                          step="0.05"
-                          min="0.5"
-                          max="4"
-                          value={props.fuelPricePerLiter}
-                          onInput={(event) =>
-                            props.onChangeFuelPricePerLiter(
-                              Math.max(0.5, Number(event.currentTarget.value) || 1.78),
-                            )
-                          }
-                          class="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
-                        />
-                      </label>
-                    </div>
-                  </Show>
+                  <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    Comparateur péages
+                  </h2>
 
                   <div class="grid grid-cols-3 gap-2">
                     <div class="rounded-xl border border-slate-800 bg-slate-900/70 p-2.5">
@@ -530,9 +474,7 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                       <div class="mt-1 text-sm font-bold text-sky-300">
                         {formatEur(summary().directTollEur)}
                       </div>
-                      <div class="text-[10px] text-slate-400">
-                        Total {formatEur(summary().directTollEur + directFuelEur())}
-                      </div>
+                      <div class="text-[10px] text-slate-500">Péage direct</div>
                       <div class="mt-1.5 border-t border-slate-800 pt-1 text-[10px] text-slate-400">
                         {formatDuration(highwayMinutes())} · {formatKm(highwayKm())}
                       </div>
@@ -546,10 +488,7 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                         {formatEur(summary().currentTollEur)}
                       </div>
                       <div class="text-[10px] text-emerald-200/80">
-                        <Show
-                          when={summary().savingsEur > 0}
-                          fallback={`Total ${formatEur(summary().currentTollEur + currentFuelEur())}`}
-                        >
+                        <Show when={summary().savingsEur > 0} fallback="Identique au direct">
                           -{formatEur(summary().savingsEur)} (-{summary().savingsPercent}%)
                         </Show>
                       </div>
@@ -574,7 +513,9 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                       <div class="mt-1 text-sm font-bold text-violet-200">0,00 €</div>
                       <div class="text-[10px] text-slate-400">
                         <Show when={props.tollFreeRoute} fallback="Indisponible">
-                          Total {formatEur(tollFreeFuelEur())}
+                          {summary().directTollEur > 0
+                            ? `-${formatEur(summary().directTollEur)}`
+                            : "Gratuit"}
                         </Show>
                       </div>
                       <div class="mt-1.5 border-t border-slate-800 pt-1 text-[10px] text-slate-400">
@@ -992,17 +933,13 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
 
                 <Show when={closedRuns().length > 0 && props.dataset}>
                   <section class="space-y-2.5 pb-4">
-                    <div class="flex items-start justify-between gap-2">
-                      <div>
-                        <div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-300">
-                          <SlidersHorizontal class="h-3.5 w-3.5 text-emerald-400" />
-                          Sorties intermédiaires (fractionnement)
-                        </div>
-                        <p class="mt-0.5 text-[11px] text-slate-400">
-                          Sortir puis rerentrer au même péage (+{SPLIT_EXTRA_MINUTES} min) pour
-                          payer moins cher.
-                        </p>
-                      </div>
+                    <div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-300">
+                      <SlidersHorizontal class="h-3.5 w-3.5 text-emerald-400" />
+                      <span>Sorties intermédiaires</span>
+                      <InfoTooltip
+                        label="Explication des sorties intermédiaires"
+                        text="Sortir puis rerentrer au même échangeur permet parfois de payer moins cher grâce aux écarts de grille tarifaire. Les +4 min affichées sont une estimation moyenne à la volée."
+                      />
                     </div>
 
                     <div class="grid grid-cols-2 gap-1 rounded-xl border border-slate-800 bg-slate-900/70 p-1">

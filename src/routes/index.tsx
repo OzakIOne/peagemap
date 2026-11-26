@@ -6,7 +6,6 @@ import { TollMap } from "~/components/toll-map";
 import { evaluateRouteTolls, optimizeTollSplits } from "~/domain/toll-calculator";
 import {
   TollDatasetSchema,
-  VEHICLE_CLASS_META,
   type BypassDetour,
   type PlaceSuggestion,
   type RunEntryExitOverride,
@@ -40,10 +39,6 @@ const HomePage = () => {
   const [maxAddedMinutes, setMaxAddedMinutes] = createSignal(12);
   const [showTollFree, setShowTollFree] = createSignal(false);
   const [selectedSectionId, setSelectedSectionId] = createSignal<string | null>(null);
-  const [litersPer100Km, setLitersPer100Km] = createSignal(
-    VEHICLE_CLASS_META.c1.defaultLitersPer100Km,
-  );
-  const [fuelPricePerLiter, setFuelPricePerLiter] = createSignal(1.78);
 
   onMount(() => {
     setHydrated(true);
@@ -105,11 +100,6 @@ const HomePage = () => {
       setSelectedSectionId(null);
     }
   });
-
-  const handleVehicleClassChange = (nextClass: VehicleClass) => {
-    setVehicleClass(nextClass);
-    setLitersPer100Km(VEHICLE_CLASS_META[nextClass].defaultLitersPer100Km);
-  };
 
   const dataset = () => (datasetQuery.isSuccess ? datasetQuery.data : null);
   const routeData = () =>
@@ -404,7 +394,7 @@ const HomePage = () => {
           setStops([]);
         }}
         vehicleClass={vehicleClass()}
-        onChangeVehicleClass={handleVehicleClassChange}
+        onChangeVehicleClass={setVehicleClass}
         isLoadingRoute={
           (routeQuery.isFetching || datasetQuery.isFetching) &&
           !summary() &&
@@ -438,10 +428,6 @@ const HomePage = () => {
         onToggleBypassSection={handleToggleBypassSection}
         selectedSectionId={selectedSectionId()}
         onSelectSection={setSelectedSectionId}
-        litersPer100Km={litersPer100Km()}
-        onChangeLitersPer100Km={setLitersPer100Km}
-        fuelPricePerLiter={fuelPricePerLiter()}
-        onChangeFuelPricePerLiter={setFuelPricePerLiter}
       />
 
       <section class="relative flex-1">
