@@ -1,5 +1,6 @@
 import { Moon, Sun } from "lucide-solid";
 import type * as maplibregl from "maplibre-gl";
+import maplibreWorkerCode from "maplibre-gl/dist/maplibre-gl-worker.mjs?raw";
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type {
   MatchedTollUnit,
@@ -342,34 +343,51 @@ export const TollMap = (props: TollMapProps) => {
     }
   };
 
-  onMount(async () => {
-    if (!containerRef) return;
-    const ml = await import("maplibre-gl");
-    maplibreModule = ml;
-
-    const map = new ml.Map({
-      container: containerRef,
-      style: DARK_STYLE_URL,
-      center: [2.4, 46.7],
-      zoom: 5.5,
-      attributionControl: false,
-    });
-
-    map.addControl(new ml.NavigationControl({ showCompass: false }), "bottom-right");
-    map.addControl(new ml.AttributionControl({ compact: true }), "bottom-right");
-
-    map.on("load", () => {
-      setMapReady(true);
-      syncMapData();
-    });
-
-    mapInstance = map;
+  onMount(() => {
+    let disposed = false;
+    let workerBlobUrl: string | null = null;
 
     onCleanup(() => {
+      disposed = true;
       clearMarkers();
-      map.remove();
+      mapInstance?.remove();
       mapInstance = null;
+      if (workerBlobUrl) {
+        URL.revokeObjectURL(workerBlobUrl);
+        workerBlobUrl = null;
+      }
     });
+
+    void (async () => {
+      if (!containerRef) return;
+      const ml = await import("maplibre-gl");
+      if (disposed || !containerRef) return;
+
+      workerBlobUrl = URL.createObjectURL(
+        new Blob([maplibreWorkerCode], { type: "text/javascript" }),
+      );
+      ml.setWorkerUrl(workerBlobUrl);
+      maplibreModule = ml;
+
+      const map = new ml.Map({
+        container: containerRef,
+        style: DARK_STYLE_URL,
+        center: [2.4, 46.7],
+        zoom: 5.5,
+        attributionControl: false,
+      });
+
+      map.addControl(new ml.NavigationControl({ showCompass: false }), "bottom-right");
+      map.addControl(new ml.AttributionControl({ compact: true }), "bottom-right");
+
+      map.on("load", () => {
+        if (disposed) return;
+        setMapReady(true);
+        syncMapData();
+      });
+
+      mapInstance = map;
+    })();
   });
 
   createEffect(() => {
