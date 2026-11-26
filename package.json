@@ -2,7 +2,6 @@
   "name": "peagemap",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.23.0",
   "scripts": {
     "dev": "vite dev --port 3000",
     "build": "vite build",
@@ -13,6 +12,7 @@
     "lint:check": "oxlint . --type-check --type-aware",
     "fmt": "oxfmt --check .",
     "fmt:write": "oxfmt .",
+    "data:build": "node scripts/build-toll-dataset.ts",
     "check": "pnpm typecheck && pnpm lint:check && pnpm fmt && pnpm test"
   },
   "dependencies": {
@@ -36,5 +36,6 @@
     "vite": "^8.4.0",
     "vite-plugin-solid": "^2.11.17",
     "vitest": "^5.1.2"
-  }
+  },
+  "packageManager": "pnpm@12.23.0"
 }

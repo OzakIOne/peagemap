@@ -1,0 +1,10 @@
+{
+  "ignorePatterns": [
+    "dist/**",
+    ".output/**",
+    ".tanstack/**",
+    "src/routeTree.gen.ts",
+    "public/data/**",
+    "data/raw/**"
+  ]
+}

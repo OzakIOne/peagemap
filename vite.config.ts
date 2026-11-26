@@ -1,7 +1,7 @@
-import tailwindcss from '@tailwindcss/vite'
-import { tanstackStart } from '@tanstack/solid-start/plugin/vite'
-import { defineConfig } from 'vite'
-import viteSolid from 'vite-plugin-solid'
+import tailwindcss from "@tailwindcss/vite";
+import { tanstackStart } from "@tanstack/solid-start/plugin/vite";
+import { defineConfig } from "vite";
+import viteSolid from "vite-plugin-solid";
 
 export default defineConfig({
   server: {
@@ -11,4 +11,4 @@ export default defineConfig({
     tsconfigPaths: true,
   },
   plugins: [tailwindcss(), tanstackStart(), viteSolid({ ssr: true })],
-})
+});
