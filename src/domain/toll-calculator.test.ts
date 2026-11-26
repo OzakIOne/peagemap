@@ -1,13 +1,20 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   SPLIT_EXTRA_MINUTES,
+  computeProfileOptimization,
   computeSectionHourlyRateEur,
   estimateFuelCostEur,
   evaluateIntermediateSplitCandidates,
   evaluateRouteTolls,
+  getFreeFlowPaymentUrl,
+  getSplitExtraMinutes,
+  isFreeFlowPlaza,
+  matchRouteTollUnits,
   optimizeTollSplits,
 } from "./toll-calculator";
-import type { TollDataset } from "./toll-types";
+import { TollDatasetSchema, type TollDataset } from "./toll-types";
 
 const sampleDataset: TollDataset = {
   version: "test-2026",
@@ -264,5 +271,103 @@ describe("toll-calculator", () => {
     expect(closedSections[2]?.bypassRole).toBe("after-exit");
     expect(trimmed.splitCount).toBe(0);
     expect(trimmed.currentTollEur).toBe(13.5);
+  });
+
+  it("detects Flux Libre plazas and skips them for intermediate split suggestions", () => {
+    const a79Plaza = {
+      id: "aliae:digoin",
+      name: "Digoin",
+      highway: "A79",
+      concessionaire: "ALIAE",
+      networkId: "aliae",
+      system: "closed" as const,
+      lat: 46.48,
+      lon: 3.98,
+    };
+    expect(isFreeFlowPlaza(a79Plaza)).toBe(true);
+    expect(getFreeFlowPaymentUrl(a79Plaza)).toBe("https://paiement.aliae.com");
+    expect(getSplitExtraMinutes(false)).toBe(4);
+    expect(getSplitExtraMinutes(true)).toBe(2);
+  });
+
+  it("does not fabricate fake savings when a split sub-section has a missing tariff", () => {
+    const missingTariffDataset: TollDataset = {
+      ...sampleDataset,
+      tariffs: {
+        "aprr:fleury|aprr:villefranche": [35.0, 52.0, 21.0],
+        "aprr:fleury|aprr:auxerre-sud": [12.0, 18.0, 7.0],
+      },
+    };
+    const result = evaluateRouteTolls({
+      dataset: missingTariffDataset,
+      coordinates: sampleRoute,
+      vehicleClass: "c1",
+      splitPlazaIds: new Set(["aprr:auxerre-sud"]),
+      bypassedSectionIds: new Set(),
+    });
+    expect(result.unknownSectionCount).toBeGreaterThan(0);
+    expect(result.savingsEur).toBe(0);
+  });
+
+  it("computes combined Rapide / Équilibré / Éco / Sans péage optimization profiles", () => {
+    const units = matchRouteTollUnits({
+      dataset: sampleDataset,
+      coordinates: sampleRoute,
+      vehicleClass: "c1",
+    });
+
+    const fast = computeProfileOptimization({
+      dataset: sampleDataset,
+      coordinates: sampleRoute,
+      units,
+      vehicleClass: "c1",
+      profile: "fast",
+    });
+    expect(fast.splitPlazaIds).toEqual([]);
+    expect(fast.showTollFree).toBe(false);
+
+    const balanced = computeProfileOptimization({
+      dataset: sampleDataset,
+      coordinates: sampleRoute,
+      units,
+      vehicleClass: "c1",
+      profile: "balanced",
+    });
+    expect(balanced.splitPlazaIds.length).toBeGreaterThan(0);
+    expect(balanced.showTollFree).toBe(false);
+
+    const free = computeProfileOptimization({
+      dataset: sampleDataset,
+      coordinates: sampleRoute,
+      units,
+      vehicleClass: "c1",
+      profile: "free",
+    });
+    expect(free.showTollFree).toBe(true);
+  });
+
+  it("validates and evaluates the real tolls-fr-2026.json dataset on a Paris-Lyon corridor", () => {
+    const raw = readFileSync(resolve(process.cwd(), "public/data/tolls-fr-2026.json"), "utf8");
+    const realDataset = TollDatasetSchema.parse(JSON.parse(raw));
+    expect(realDataset.plazas.length).toBeGreaterThan(500);
+
+    const parisLyonApprox: Array<[number, number]> = [
+      [2.578, 48.445],
+      [2.595, 48.338],
+      [3.57, 47.82],
+      [4.309, 47.436],
+      [4.792, 46.283],
+      [4.718, 45.978],
+    ];
+
+    const evalResult = evaluateRouteTolls({
+      dataset: realDataset,
+      coordinates: parisLyonApprox,
+      vehicleClass: "c1",
+      splitPlazaIds: new Set(),
+      bypassedSectionIds: new Set(),
+    });
+    expect(evalResult.units.length).toBeGreaterThan(0);
+    expect(evalResult.directTollEur).toBeGreaterThan(20);
   });
 });

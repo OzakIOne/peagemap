@@ -38,6 +38,7 @@ export const TollPlazaSchema = z.object({
   concessionaire: z.string().min(1),
   networkId: z.string().min(1),
   system: TollSystemSchema,
+  freeFlow: z.boolean().optional(),
   lat: z.number(),
   lon: z.number(),
 });
@@ -125,6 +126,8 @@ export interface PricedTollSection {
   bypassRole?: "manual" | "before-entry" | "after-exit";
   isSplitStart: boolean;
   isSplitEnd: boolean;
+  isFreeFlow: boolean;
+  freeFlowPaymentUrl?: string;
   bypassExtraMinutes: number;
   coordinates: Array<[number, number]>;
 }
@@ -165,7 +168,16 @@ export interface BypassDetour {
   durationSeconds: number;
   extraMinutes: number;
   extraDistanceKm: number;
+  startCoordIndex?: number;
+  endCoordIndex?: number;
 }
+
+export type BypassDetourState =
+  | { status: "loading" }
+  | { status: "ready"; detour: BypassDetour }
+  | { status: "error"; message: string };
+
+export type OptimizationProfile = "fast" | "balanced" | "eco" | "free";
 
 export interface SplitCandidateInsight {
   matched: MatchedPlaza;

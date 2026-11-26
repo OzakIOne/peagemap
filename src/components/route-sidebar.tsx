@@ -1,35 +1,28 @@
 import {
   ArrowUpDown,
+  Bike,
   Car,
   ChevronDown,
   ChevronUp,
-  Download,
-  ExternalLink,
-  Info,
   Loader2,
-  MapPin,
-  Navigation,
+  Map as MapIcon,
   Plus,
   RotateCcw,
   Route,
   Scissors,
   SlidersHorizontal,
-  Sparkles,
   Trash2,
   Truck,
+  Zap,
 } from "lucide-solid";
 import { For, Show, createSignal } from "solid-js";
-import {
-  SPLIT_EXTRA_KM,
-  SPLIT_EXTRA_MINUTES,
-  computeSectionHourlyRateEur,
-  evaluateIntermediateSplitCandidates,
-  resolveRunEntryExitIndices,
-} from "~/domain/toll-calculator";
+import { computeEffectiveRouteMetrics } from "~/domain/toll-calculator";
 import {
   VEHICLE_CLASS_META,
   type BypassDetour,
+  type BypassDetourState,
   type ClosedTollRun,
+  type OptimizationProfile,
   type OptimizationResult,
   type PlaceSuggestion,
   type PricedRouteSummary,
@@ -39,38 +32,18 @@ import {
   type VehicleClass,
 } from "~/domain/toll-types";
 import { PRESET_TRIPS, formatDuration, formatEur, formatKm } from "~/lib/format";
-import {
-  buildAppleMapsUrl,
-  buildGoogleMapsUrl,
-  buildWazeUrl,
-  collectOrderedExportWaypoints,
-  downloadGpxFile,
-  type RouteExportInput,
-} from "~/lib/route-export";
+import type { RouteExportInput } from "~/lib/route-export";
 import { PlaceInput } from "./place-input";
+import { RouteExportBar } from "./route-export-bar";
+import { SmartSplitsTab } from "./smart-splits-tab";
+import { TollSectionsTab } from "./toll-sections-tab";
 
 export interface RouteStopItem {
   id: string;
   place: PlaceSuggestion | null;
 }
 
-const InfoTooltip = (props: { text: string; label: string }) => (
-  <span class="group relative inline-flex items-center">
-    <button
-      type="button"
-      aria-label={props.label}
-      class="inline-flex h-4 w-4 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 focus:bg-slate-800 focus:text-slate-100 focus:outline-none"
-    >
-      <Info class="h-3.5 w-3.5" />
-    </button>
-    <span
-      role="tooltip"
-      class="pointer-events-none absolute left-1/2 top-full z-40 mt-1.5 w-60 -translate-x-1/2 rounded-xl border border-slate-700/90 bg-slate-950/98 px-2.5 py-2 text-[11px] font-normal normal-case leading-relaxed tracking-normal text-slate-200 opacity-0 shadow-2xl transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100"
-    >
-      {props.text}
-    </span>
-  </span>
-);
+export type MobileSheetMode = "peek" | "half" | "full";
 
 interface RouteSidebarProps {
   dataset: TollDataset | null;
@@ -91,151 +64,252 @@ interface RouteSidebarProps {
   onSelectPreset: (origin: PlaceSuggestion, destination: PlaceSuggestion) => void;
   vehicleClass: VehicleClass;
   onChangeVehicleClass: (vehicleClass: VehicleClass) => void;
+  hasTelepeage: boolean;
+  onToggleTelepeage: () => void;
+  splitExtraMinutes: number;
   isLoadingRoute: boolean;
+  isFetchingRoute: boolean;
+  isLoadingTollFree: boolean;
   routeError: string | null;
   highwayRoute: RouteGeometry | null;
   tollFreeRoute: RouteGeometry | null;
   showTollFree: boolean;
-  onToggleShowTollFree: () => void;
+  onSetShowTollFree: (show: boolean) => void;
   summary: PricedRouteSummary | null;
   runOverrides: Readonly<Record<string, RunEntryExitOverride>>;
   onSetRunEntry: (runId: string, plazaId: string | undefined) => void;
   onSetRunExit: (runId: string, plazaId: string | undefined) => void;
   onResetRunOverride: (runId: string) => void;
-  bypassDetours: Readonly<Record<string, BypassDetour>>;
-  loadingBypassIds: ReadonlySet<string>;
+  bypassStates: Readonly<Record<string, BypassDetourState>>;
   optimization: OptimizationResult | null;
   maxAddedMinutes: number;
   onChangeMaxAddedMinutes: (minutes: number) => void;
   onApplyOptimization: () => void;
+  onApplyProfile: (profile: OptimizationProfile) => void;
+  activeProfile: OptimizationProfile | null;
   onResetCustomizations: () => void;
   splitPlazaIds: ReadonlySet<string>;
   onToggleSplitPlaza: (plazaId: string) => void;
   onToggleBypassSection: (sectionId: string) => void;
+  onRetryBypassSection: (sectionId: string) => void;
   selectedSectionId: string | null;
+  hoveredSectionId: string | null;
+  scrollToSelectedToken: number;
   onSelectSection: (sectionId: string) => void;
+  onHoverSection: (sectionId: string | null) => void;
+  onCopyShareLink: () => Promise<boolean>;
+  mobileSheetMode: MobileSheetMode;
+  onChangeMobileSheetMode: (mode: MobileSheetMode) => void;
 }
 
-export const RouteSidebar = (props: RouteSidebarProps) => {
-  const [collapsedRunIds, setCollapsedRunIds] = createSignal<Set<string>>(new Set());
-  const [onlyProfitableSplits, setOnlyProfitableSplits] = createSignal(true);
+const PROFILE_OPTIONS: Array<{ id: OptimizationProfile; label: string }> = [
+  { id: "fast", label: "Rapide" },
+  { id: "balanced", label: "Équilibré" },
+  { id: "eco", label: "Éco" },
+  { id: "free", label: "0 €" },
+];
 
-  const toggleRunCollapsed = (runId: string) => {
-    setCollapsedRunIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(runId)) {
-        next.delete(runId);
-      } else {
-        next.add(runId);
-      }
-      return next;
-    });
-  };
+export const RouteSidebar = (props: RouteSidebarProps) => {
+  const [activeTab, setActiveTab] = createSignal<"sections" | "splits">("sections");
 
   const highwayKm = () => (props.highwayRoute ? props.highwayRoute.distanceMeters / 1000 : 0);
   const highwayMinutes = () => (props.highwayRoute ? props.highwayRoute.durationSeconds / 60 : 0);
-
-  const effectiveAddedMinutes = () => {
-    const summary = props.summary;
-    if (!summary) return 0;
-    let total = summary.splitCount * SPLIT_EXTRA_MINUTES;
-    for (const section of summary.sections) {
-      if (!section.isBypassed) continue;
-      const detour = props.bypassDetours[section.id];
-      total += detour ? detour.extraMinutes : section.bypassExtraMinutes;
-    }
-    return Math.round(total);
-  };
-
-  const effectiveAddedDistanceKm = () => {
-    const summary = props.summary;
-    if (!summary) return 0;
-    let total = summary.splitCount * SPLIT_EXTRA_KM;
-    for (const section of summary.sections) {
-      if (!section.isBypassed) continue;
-      const detour = props.bypassDetours[section.id];
-      total += detour
-        ? detour.extraDistanceKm
-        : section.kind === "open"
-          ? 3.5
-          : Math.round(section.distanceKm * 0.12 * 10) / 10;
-    }
-    return Math.round(total * 10) / 10;
-  };
-
   const tollFreeKm = () => (props.tollFreeRoute ? props.tollFreeRoute.distanceMeters / 1000 : 0);
   const tollFreeMinutes = () =>
     props.tollFreeRoute ? props.tollFreeRoute.durationSeconds / 60 : 0;
 
+  const effectiveMetrics = () => {
+    const summary = props.summary;
+    if (!summary) return { addedMinutes: 0, addedDistanceKm: 0 };
+    return computeEffectiveRouteMetrics({
+      summary,
+      bypassStates: props.bypassStates,
+      splitExtraMinutes: props.splitExtraMinutes,
+    });
+  };
+
   const closedRuns = (): ClosedTollRun[] =>
     (props.summary?.units ?? []).filter((unit): unit is ClosedTollRun => unit.kind === "closed");
 
-  const activeStops = (): PlaceSuggestion[] =>
-    props.stops
-      .map((stop) => stop.place)
-      .filter((place): place is PlaceSuggestion => place !== null);
+  const hasCustomizations = () => {
+    const summary = props.summary;
+    if (!summary) return false;
+    return (
+      summary.splitCount > 0 ||
+      summary.bypassCount > 0 ||
+      Object.keys(props.runOverrides).length > 0
+    );
+  };
+
+  const hasManualBypasses = () => {
+    const summary = props.summary;
+    if (!summary) return false;
+    return summary.bypassCount > 0 || Object.keys(props.runOverrides).length > 0;
+  };
+
+  const readyBypassDetours = (): Record<string, BypassDetour> => {
+    const out: Record<string, BypassDetour> = {};
+    for (const [id, state] of Object.entries(props.bypassStates)) {
+      if (state.status === "ready") {
+        out[id] = state.detour;
+      }
+    }
+    return out;
+  };
 
   const exportInput = (): RouteExportInput | null => {
-    if (!props.origin || !props.destination) return null;
-    const useTollFree = props.showTollFree && Boolean(props.tollFreeRoute);
-    const activeRoute = useTollFree ? props.tollFreeRoute : props.highwayRoute;
-    if (!activeRoute) return null;
-
-    const allSectionsBypassed =
-      Boolean(props.summary) &&
-      (props.summary?.sections.length ?? 0) > 0 &&
-      (props.summary?.sections.every((section) => section.isBypassed) ?? false);
-
+    if (!props.origin || !props.destination || !props.highwayRoute || !props.summary) {
+      return null;
+    }
+    const route =
+      props.showTollFree && props.tollFreeRoute ? props.tollFreeRoute : props.highwayRoute;
+    const validStops = props.stops
+      .map((stop) => stop.place)
+      .filter((place): place is PlaceSuggestion => place !== null);
     return {
       origin: props.origin,
       destination: props.destination,
-      stops: activeStops(),
-      route: activeRoute,
-      units: props.summary?.units ?? [],
-      sections: props.summary?.sections ?? [],
-      bypassDetours: props.bypassDetours,
+      stops: validStops,
+      route,
+      units: props.summary.units,
+      sections: props.summary.sections,
+      bypassDetours: readyBypassDetours(),
       splitPlazaIds: props.splitPlazaIds,
-      avoidTolls: useTollFree || allSectionsBypassed,
+      avoidTolls: props.showTollFree,
     };
   };
 
+  const cycleMobileSheet = () => {
+    const current = props.mobileSheetMode;
+    if (current === "peek") props.onChangeMobileSheetMode("half");
+    else if (current === "half") props.onChangeMobileSheetMode("full");
+    else props.onChangeMobileSheetMode("peek");
+  };
+
+  const mobileHeightClass = () => {
+    const mode = props.mobileSheetMode;
+    if (mode === "peek") return "h-[136px]";
+    if (mode === "half") return "h-[58dvh]";
+    return "h-[92dvh]";
+  };
+
   return (
-    <aside class="z-20 flex h-full w-full max-w-[420px] flex-col border-r border-slate-800/90 bg-slate-950/94 backdrop-blur-xl">
-      <header class="flex items-center justify-between border-b border-slate-800/80 px-4 py-3">
+    <aside
+      class={`fixed inset-x-0 bottom-0 z-20 flex flex-col rounded-t-2xl border-t border-slate-800/90 bg-slate-950/96 shadow-2xl backdrop-blur-xl transition-[height] duration-200 ease-out lg:static lg:h-full lg:w-[416px] lg:shrink-0 lg:rounded-none lg:border-r lg:border-t-0 ${mobileHeightClass()}`}
+    >
+      {/* Mobile drag/toggle handle */}
+      <button
+        type="button"
+        onClick={cycleMobileSheet}
+        aria-label="Ajuster la hauteur du panneau"
+        class="flex shrink-0 flex-col items-center gap-1 pt-2 pb-1 lg:hidden"
+      >
+        <span class="h-1 w-10 rounded-full bg-slate-700" />
+      </button>
+
+      {/* Header */}
+      <header class="flex shrink-0 items-center justify-between gap-2 border-b border-slate-800/80 px-4 py-2.5 lg:py-3">
         <div class="flex items-center gap-2.5">
-          <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-sky-500 to-emerald-500 text-slate-950 shadow-lg shadow-sky-500/20">
+          <div class="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-emerald-500 text-slate-950 shadow-lg shadow-sky-500/20">
             <Route class="h-4.5 w-4.5" />
           </div>
           <div>
-            <h1 class="text-sm font-bold tracking-tight text-slate-100">PeageMap</h1>
-            <p class="text-[11px] text-slate-400">
+            <h1 class="text-sm font-bold tracking-tight text-white">PeageMap</h1>
+            <p class="text-[11px] tabular-nums text-slate-400">
               <Show when={props.datasetStats} fallback="Chargement tarifs 2026…">
                 {(stats) =>
-                  `${stats().plazaCount} gares · ${stats().tariffCount.toLocaleString("fr-FR")} tarifs 2026`
+                  `${stats().plazaCount} gares · ${stats().tariffCount.toLocaleString("fr-FR")} tarifs`
                 }
               </Show>
             </p>
           </div>
         </div>
-        <Show when={(props.summary?.splitCount ?? 0) > 0 || (props.summary?.bypassCount ?? 0) > 0}>
+
+        <div class="flex items-center gap-1.5">
+          <Show when={props.isFetchingRoute && props.summary}>
+            <Loader2 class="h-3.5 w-3.5 animate-spin text-sky-400" />
+          </Show>
+
+          <Show when={hasCustomizations()}>
+            <button
+              type="button"
+              onClick={() => props.onResetCustomizations()}
+              title="Réinitialiser toutes les personnalisations"
+              class="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-medium text-slate-300 transition-[border-color,color,transform] duration-150 hover:border-slate-500 hover:text-white active:scale-[0.97]"
+            >
+              <RotateCcw class="h-3 w-3" />
+              <span>Réinitialiser</span>
+            </button>
+          </Show>
+
           <button
             type="button"
-            onClick={() => props.onResetCustomizations()}
-            class="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-slate-500 hover:text-white"
+            onClick={() =>
+              props.onChangeMobileSheetMode(props.mobileSheetMode === "peek" ? "half" : "peek")
+            }
+            class="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-semibold text-sky-300 lg:hidden"
           >
-            <RotateCcw class="h-3 w-3" />
-            Direct
+            <Show
+              when={props.mobileSheetMode === "peek"}
+              fallback={
+                <>
+                  <MapIcon class="h-3 w-3" />
+                  <span>Carte</span>
+                </>
+              }
+            >
+              <span>Détails</span>
+              <ChevronUp class="h-3 w-3" />
+            </Show>
           </button>
-        </Show>
+        </div>
       </header>
 
-      <div class="flex-1 overflow-y-auto px-4 py-3.5">
+      {/* Mobile compact summary bar when in peek mode */}
+      <Show when={props.mobileSheetMode === "peek" && props.summary}>
+        {(summary) => (
+          <button
+            type="button"
+            onClick={() => props.onChangeMobileSheetMode("half")}
+            class="flex items-center justify-between px-4 py-2 text-left lg:hidden"
+          >
+            <div class="min-w-0">
+              <div class="truncate text-xs font-semibold text-slate-100">
+                {props.origin?.label} → {props.destination?.label}
+              </div>
+              <div class="text-[11px] tabular-nums text-slate-400">
+                {formatDuration(highwayMinutes() + effectiveMetrics().addedMinutes)} ·{" "}
+                {formatKm(Math.max(0, highwayKm() + effectiveMetrics().addedDistanceKm))}
+              </div>
+            </div>
+            <div class="shrink-0 text-right tabular-nums">
+              <div class="text-sm font-bold text-emerald-300">
+                {props.showTollFree ? "0,00 €" : formatEur(summary().currentTollEur)}
+              </div>
+              <Show when={!props.showTollFree && summary().savingsEur > 0}>
+                <div class="text-[10px] font-semibold text-emerald-400">
+                  -{formatEur(summary().savingsEur)}
+                </div>
+              </Show>
+            </div>
+          </button>
+        )}
+      </Show>
+
+      {/* Scrollable main content */}
+      <div
+        class={`flex-1 space-y-4 overflow-y-auto px-4 py-3.5 ${
+          props.mobileSheetMode === "peek" ? "hidden lg:block" : "block"
+        }`}
+      >
+        {/* Search inputs */}
         <section class="space-y-2">
           <div class="space-y-2">
             <PlaceInput
               label="Départ (A)"
               placeholder="Ex : Paris, Lyon, Lille…"
-              dotColorClass="bg-sky-400"
+              dotColorClass="bg-sky-500"
+              badgeText="A"
               value={props.origin}
               onSelect={(place) => props.onSelectOrigin(place)}
               onClear={() => props.onClearOrigin()}
@@ -255,34 +329,34 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                       onClear={() => props.onClearStop(stop.id)}
                     />
                   </div>
-                  <div class="flex flex-col gap-0.5">
+                  <div class="flex shrink-0 flex-col gap-0.5">
                     <button
                       type="button"
-                      aria-label={`Monter l'étape ${index() + 1}`}
                       disabled={index() === 0}
+                      aria-label="Monter l’étape"
                       onClick={() => props.onMoveStop(stop.id, "up")}
-                      class="rounded-md border border-slate-800 bg-slate-900 p-1 text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
+                      class="rounded-md border border-slate-800 bg-slate-900 p-1 text-slate-400 transition-colors hover:border-slate-600 hover:text-white disabled:opacity-30"
                     >
                       <ChevronUp class="h-3 w-3" />
                     </button>
                     <button
                       type="button"
-                      aria-label={`Descendre l'étape ${index() + 1}`}
                       disabled={index() === props.stops.length - 1}
+                      aria-label="Descendre l’étape"
                       onClick={() => props.onMoveStop(stop.id, "down")}
-                      class="rounded-md border border-slate-800 bg-slate-900 p-1 text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
+                      class="rounded-md border border-slate-800 bg-slate-900 p-1 text-slate-400 transition-colors hover:border-slate-600 hover:text-white disabled:opacity-30"
                     >
                       <ChevronDown class="h-3 w-3" />
                     </button>
+                    <button
+                      type="button"
+                      aria-label="Supprimer l’étape"
+                      onClick={() => props.onRemoveStop(stop.id)}
+                      class="rounded-md border border-slate-800 bg-slate-900 p-1 text-slate-400 transition-colors hover:border-rose-500/60 hover:text-rose-300"
+                    >
+                      <Trash2 class="h-3 w-3" />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    aria-label={`Supprimer l'étape ${index() + 1}`}
-                    onClick={() => props.onRemoveStop(stop.id)}
-                    class="rounded-lg border border-slate-800 bg-slate-900 p-2 text-slate-400 transition-colors hover:border-rose-500/60 hover:bg-rose-950/40 hover:text-rose-300"
-                  >
-                    <Trash2 class="h-3.5 w-3.5" />
-                  </button>
                 </div>
               )}
             </For>
@@ -290,63 +364,53 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
             <PlaceInput
               label="Arrivée (B)"
               placeholder="Ex : Marseille, Bordeaux, Nice…"
-              dotColorClass="bg-rose-400"
+              dotColorClass="bg-rose-500"
+              badgeText="B"
               value={props.destination}
               onSelect={(place) => props.onSelectDestination(place)}
               onClear={() => props.onClearDestination()}
             />
           </div>
 
-          <div class="flex items-center justify-between gap-2 pt-0.5">
+          <div class="flex items-center justify-between gap-2">
             <button
               type="button"
               onClick={() => props.onAddStop()}
               disabled={props.stops.length >= 8}
-              class="flex items-center gap-1.5 rounded-lg border border-dashed border-slate-700 bg-slate-900/60 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-indigo-400/70 hover:bg-indigo-950/30 hover:text-indigo-200 disabled:cursor-not-allowed disabled:opacity-40"
+              class="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/90 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition-[border-color,color,transform] duration-150 hover:border-indigo-500/60 hover:text-indigo-200 active:scale-[0.97] disabled:opacity-40"
             >
-              <Plus class="h-3.5 w-3.5" />
+              <Plus class="h-3.5 w-3.5 text-indigo-400" />
               Ajouter une étape
             </button>
 
             <button
               type="button"
-              aria-label="Inverser départ et arrivée"
               onClick={() => props.onSwapPlaces()}
-              disabled={!props.origin && !props.destination && props.stops.length === 0}
-              class="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-sky-500/60 hover:text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!props.origin && !props.destination}
+              aria-label="Inverser départ et arrivée"
+              class="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/90 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition-[border-color,color,transform] duration-150 hover:border-slate-600 hover:text-white active:scale-[0.97] disabled:opacity-40"
             >
               <ArrowUpDown class="h-3.5 w-3.5" />
               Inverser
             </button>
           </div>
-
-          <div class="flex flex-wrap gap-1.5 pt-1">
-            <For each={PRESET_TRIPS}>
-              {(preset) => (
-                <button
-                  type="button"
-                  onClick={() => props.onSelectPreset(preset.origin, preset.destination)}
-                  class="rounded-full border border-slate-800 bg-slate-900/80 px-2.5 py-1 text-[11px] font-medium text-slate-300 transition-colors hover:border-sky-500/50 hover:bg-slate-800 hover:text-white"
-                >
-                  {preset.label}
-                </button>
-              )}
-            </For>
-          </div>
         </section>
 
-        <section class="mt-3.5">
+        {/* Vehicle class + Télépéage */}
+        <section class="space-y-2">
           <div class="grid grid-cols-3 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/70 p-1">
-            <For each={["c1", "c2", "c5"] as VehicleClass[]}>
+            <For each={["c1", "c2", "c5"] as const}>
               {(cls) => {
                 const active = () => props.vehicleClass === cls;
+                const meta = VEHICLE_CLASS_META[cls];
                 return (
                   <button
                     type="button"
                     onClick={() => props.onChangeVehicleClass(cls)}
-                    class={`flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium transition-all ${
+                    title={meta.description}
+                    class={`flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium transition-[background-color,color,transform] duration-150 active:scale-[0.97] ${
                       active()
-                        ? "bg-sky-500/20 text-sky-200 ring-1 ring-sky-400/50"
+                        ? "bg-sky-500/20 text-sky-200 ring-1 ring-sky-500/50"
                         : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-200"
                     }`}
                   >
@@ -356,31 +420,69 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
                     <Show when={cls === "c2"}>
                       <Truck class="h-3.5 w-3.5" />
                     </Show>
-                    <span>{VEHICLE_CLASS_META[cls].shortLabel}</span>
+                    <Show when={cls === "c5"}>
+                      <Bike class="h-3.5 w-3.5" />
+                    </Show>
+                    <span>{meta.shortLabel}</span>
                   </button>
                 );
               }}
             </For>
           </div>
+
+          <button
+            type="button"
+            onClick={() => props.onToggleTelepeage()}
+            class={`flex w-full items-center justify-between rounded-xl border px-3 py-1.5 text-[11px] font-medium transition-[border-color,background-color,color] duration-150 ${
+              props.hasTelepeage
+                ? "border-emerald-500/45 bg-emerald-950/30 text-emerald-200"
+                : "border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-700 hover:text-slate-200"
+            }`}
+          >
+            <span class="flex items-center gap-1.5">
+              <Zap
+                class={`h-3.5 w-3.5 ${props.hasTelepeage ? "text-emerald-400" : "text-slate-500"}`}
+              />
+              <span>Badge Télépéage</span>
+            </span>
+            <span class="tabular-nums text-[10px]">
+              {props.hasTelepeage ? "Actif (~2 min/sortie)" : "Sans badge (~4 min/sortie)"}
+            </span>
+          </button>
         </section>
 
+        {/* Empty state with presets */}
         <Show when={!props.origin || !props.destination}>
-          <div class="mt-4 rounded-2xl border border-slate-800/90 bg-slate-900/50 p-4 text-center">
-            <div class="mx-auto flex h-9 w-9 items-center justify-center rounded-xl bg-sky-500/15 text-sky-400">
-              <MapPin class="h-4.5 w-4.5" />
+          <div class="space-y-3 rounded-2xl border border-dashed border-slate-800 bg-slate-900/35 p-4 text-center">
+            <div class="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-slate-900 text-sky-400">
+              <Route class="h-5 w-5" />
             </div>
-            <p class="mt-2.5 text-xs font-semibold text-slate-200">
-              Planifiez votre trajet autoroutier
-            </p>
-            <p class="mt-1 text-[11px] leading-relaxed text-slate-400">
-              Saisissez un départ, une arrivée (et vos étapes si besoin) ou choisissez un trajet
-              rapide ci-dessus pour calculer et optimiser chaque section de péage.
-            </p>
+            <div>
+              <p class="text-sm font-semibold text-slate-200">Planifiez votre trajet autoroutier</p>
+              <p class="mt-1 text-xs leading-relaxed text-slate-400">
+                Choisissez un départ et une arrivée, ou cliquez droit sur la carte pour poser un
+                point.
+              </p>
+            </div>
+            <div class="flex flex-wrap justify-center gap-1.5 pt-1">
+              <For each={PRESET_TRIPS}>
+                {(preset) => (
+                  <button
+                    type="button"
+                    onClick={() => props.onSelectPreset(preset.origin, preset.destination)}
+                    class="rounded-full border border-slate-800 bg-slate-900/90 px-2.5 py-1 text-[11px] font-medium text-slate-300 transition-[border-color,color,transform] duration-150 hover:border-sky-500/60 hover:text-sky-200 active:scale-[0.97]"
+                  >
+                    {preset.label}
+                  </button>
+                )}
+              </For>
+            </div>
           </div>
         </Show>
 
+        {/* Loading / Error */}
         <Show when={props.isLoadingRoute}>
-          <div class="mt-4 flex items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900/60 py-6 text-xs text-slate-300">
+          <div class="flex items-center justify-center gap-2.5 rounded-2xl border border-slate-800 bg-slate-900/60 p-6 text-xs text-slate-300">
             <Loader2 class="h-4 w-4 animate-spin text-sky-400" />
             Calcul de l’itinéraire et détection des péages…
           </div>
@@ -388,729 +490,211 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
 
         <Show when={props.routeError}>
           {(err) => (
-            <div class="mt-4 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200">
+            <div class="rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200">
               {err()}
             </div>
           )}
         </Show>
 
-        <Show when={props.highwayRoute && !props.isLoadingRoute ? props.summary : null}>
-          {(summary) => {
-            const opt = () => props.optimization;
-
-            return (
-              <div class="mt-4 space-y-4">
-                <section class="rounded-2xl border border-emerald-500/30 bg-gradient-to-b from-emerald-950/45 to-slate-900/80 p-3.5">
-                  <div class="flex items-center justify-between gap-2">
-                    <div class="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
-                      <Sparkles class="h-3.5 w-3.5" />
-                      <span>Optimisation auto (sorties péage)</span>
-                      <InfoTooltip
-                        label="Explication de l'optimisation automatique"
-                        text="Cherche les meilleures sorties/ré-entrées sur l’autoroute pour payer moins de péage. Les +4 min par sortie sont une estimation moyenne à la volée (barrière + demi-tour)."
-                      />
+        {/* Active route analysis */}
+        <Show when={props.highwayRoute ? props.summary : null}>
+          {(summary) => (
+            <div class="space-y-3.5">
+              {/* Hero Comparator */}
+              <section class="space-y-2">
+                <div class="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      props.onSetShowTollFree(false);
+                      props.onResetCustomizations();
+                    }}
+                    class={`rounded-xl border p-2.5 text-left transition-[border-color,background-color,transform] duration-150 active:scale-[0.98] ${
+                      !props.showTollFree && !hasCustomizations()
+                        ? "border-sky-400/60 bg-sky-950/30"
+                        : "border-slate-800 bg-slate-900/70 hover:border-sky-500/40"
+                    }`}
+                  >
+                    <div class="text-[10px] font-semibold uppercase text-slate-400">Direct</div>
+                    <div class="mt-1 text-sm font-bold tabular-nums text-sky-300">
+                      {formatEur(summary().directTollEur)}
                     </div>
-                    <Show when={opt() && opt()!.savingsEur > 0}>
-                      <span class="shrink-0 rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs font-bold text-emerald-300">
-                        -{formatEur(opt()!.savingsEur)}
-                      </span>
-                    </Show>
-                  </div>
-
-                  <div class="mt-2.5">
-                    <div class="flex items-center justify-between text-[11px]">
-                      <span class="text-slate-400">Détour max accepté (~4 min/sortie)</span>
-                      <span class="font-semibold text-slate-200">
-                        +{props.maxAddedMinutes} min (max{" "}
-                        {Math.floor(props.maxAddedMinutes / SPLIT_EXTRA_MINUTES)})
-                      </span>
+                    <div class="text-[10px] text-slate-500">Péage direct</div>
+                    <div class="mt-1.5 border-t border-slate-800 pt-1 text-[10px] tabular-nums text-slate-400">
+                      {formatDuration(highwayMinutes())} · {formatKm(highwayKm())}
                     </div>
-                    <input
-                      type="range"
-                      min="0"
-                      max="32"
-                      step="4"
-                      value={props.maxAddedMinutes}
-                      onInput={(event) =>
-                        props.onChangeMaxAddedMinutes(Number(event.currentTarget.value))
-                      }
-                      class="mt-1.5 h-1.5 w-full cursor-pointer appearance-none rounded-lg bg-slate-800 accent-emerald-400"
-                    />
-                  </div>
+                  </button>
 
-                  <div class="mt-3 flex items-center justify-between gap-2">
-                    <Show
-                      when={opt() && opt()!.savingsEur > 0}
-                      fallback={
-                        <span class="text-[11px] text-slate-400">
-                          Aucune sortie rentable pour ce temps max.
-                        </span>
-                      }
-                    >
-                      <div class="text-[11px] text-emerald-200/90">
-                        <strong>{opt()!.splitPlazaIds.length}</strong> sortie
-                        {opt()!.splitPlazaIds.length > 1 ? "s" : ""} (~+{opt()!.addedMinutes} min ·{" "}
-                        <strong>{formatEur(opt()!.savingsPerHourEur)}/h</strong>)
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => props.onApplyOptimization()}
-                        class="shrink-0 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 transition-colors hover:bg-emerald-400"
+                  <button
+                    type="button"
+                    onClick={() => props.onSetShowTollFree(false)}
+                    class={`rounded-xl border p-2.5 text-left transition-[border-color,background-color,transform] duration-150 active:scale-[0.98] ${
+                      !props.showTollFree && hasCustomizations()
+                        ? "border-emerald-400/70 bg-emerald-950/35"
+                        : "border-emerald-500/35 bg-emerald-950/20 hover:border-emerald-400/60"
+                    }`}
+                  >
+                    <div class="text-[10px] font-semibold uppercase text-emerald-300">
+                      Votre trajet
+                    </div>
+                    <div class="mt-1 text-sm font-bold tabular-nums text-emerald-300">
+                      {formatEur(summary().currentTollEur)}
+                    </div>
+                    <div class="text-[10px] tabular-nums text-emerald-200/80">
+                      <Show when={summary().savingsEur > 0} fallback="Identique au direct">
+                        -{formatEur(summary().savingsEur)} (-{summary().savingsPercent}%)
+                      </Show>
+                    </div>
+                    <div class="mt-1.5 border-t border-emerald-500/20 pt-1 text-[10px] tabular-nums text-slate-300">
+                      {formatDuration(highwayMinutes() + effectiveMetrics().addedMinutes)} ·{" "}
+                      {formatKm(Math.max(0, highwayKm() + effectiveMetrics().addedDistanceKm))}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => props.onSetShowTollFree(!props.showTollFree)}
+                    class={`rounded-xl border p-2.5 text-left transition-[border-color,background-color,transform] duration-150 active:scale-[0.98] ${
+                      props.showTollFree
+                        ? "border-violet-400/70 bg-violet-950/40"
+                        : "border-slate-800 bg-slate-900/70 hover:border-violet-500/40"
+                    }`}
+                  >
+                    <div class="text-[10px] font-semibold uppercase text-violet-300">
+                      Sans péage
+                    </div>
+                    <div class="mt-1 text-sm font-bold tabular-nums text-violet-200">0,00 €</div>
+                    <div class="text-[10px] tabular-nums text-slate-400">
+                      <Show
+                        when={!props.isLoadingTollFree}
+                        fallback={
+                          <span class="inline-flex items-center gap-1">
+                            <Loader2 class="h-2.5 w-2.5 animate-spin" />
+                            Calcul…
+                          </span>
+                        }
                       >
-                        Appliquer
-                      </button>
-                    </Show>
-                  </div>
-                </section>
-
-                <section class="space-y-2">
-                  <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                    Comparateur péages
-                  </h2>
-
-                  <div class="grid grid-cols-3 gap-2">
-                    <div class="rounded-xl border border-slate-800 bg-slate-900/70 p-2.5">
-                      <div class="text-[10px] font-semibold uppercase text-slate-400">Direct</div>
-                      <div class="mt-1 text-sm font-bold text-sky-300">
-                        {formatEur(summary().directTollEur)}
-                      </div>
-                      <div class="text-[10px] text-slate-500">Péage direct</div>
-                      <div class="mt-1.5 border-t border-slate-800 pt-1 text-[10px] text-slate-400">
-                        {formatDuration(highwayMinutes())} · {formatKm(highwayKm())}
-                      </div>
-                    </div>
-
-                    <div class="rounded-xl border border-emerald-500/40 bg-emerald-950/30 p-2.5">
-                      <div class="text-[10px] font-semibold uppercase text-emerald-300">
-                        Votre trajet
-                      </div>
-                      <div class="mt-1 text-sm font-bold text-emerald-300">
-                        {formatEur(summary().currentTollEur)}
-                      </div>
-                      <div class="text-[10px] text-emerald-200/80">
-                        <Show when={summary().savingsEur > 0} fallback="Identique au direct">
-                          -{formatEur(summary().savingsEur)} (-{summary().savingsPercent}%)
-                        </Show>
-                      </div>
-                      <div class="mt-1.5 border-t border-emerald-500/20 pt-1 text-[10px] text-slate-300">
-                        {formatDuration(highwayMinutes() + effectiveAddedMinutes())} ·{" "}
-                        {formatKm(Math.max(0, highwayKm() + effectiveAddedDistanceKm()))}
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => props.onToggleShowTollFree()}
-                      class={`rounded-xl border p-2.5 text-left transition-colors ${
-                        props.showTollFree
-                          ? "border-violet-400/60 bg-violet-950/35"
-                          : "border-slate-800 bg-slate-900/70 hover:border-violet-500/40"
-                      }`}
-                    >
-                      <div class="text-[10px] font-semibold uppercase text-violet-300">
-                        Sans péage
-                      </div>
-                      <div class="mt-1 text-sm font-bold text-violet-200">0,00 €</div>
-                      <div class="text-[10px] text-slate-400">
                         <Show when={props.tollFreeRoute} fallback="Indisponible">
                           {summary().directTollEur > 0
                             ? `-${formatEur(summary().directTollEur)}`
                             : "Gratuit"}
                         </Show>
-                      </div>
-                      <div class="mt-1.5 border-t border-slate-800 pt-1 text-[10px] text-slate-400">
-                        <Show when={props.tollFreeRoute} fallback="—">
-                          {formatDuration(tollFreeMinutes())} · {formatKm(tollFreeKm())}
-                        </Show>
-                      </div>
-                    </button>
-                  </div>
-                </section>
-
-                <Show when={exportInput()}>
-                  {(payload) => {
-                    const waypoints = () => collectOrderedExportWaypoints(payload());
-                    const stopCount = () =>
-                      waypoints().filter((waypoint) => waypoint.kind === "stop").length;
-                    const splitExportCount = () =>
-                      waypoints().filter((waypoint) => waypoint.kind === "split").length;
-                    const bypassExportCount = () =>
-                      waypoints().filter((waypoint) => waypoint.kind === "bypass").length;
-                    const exportSummaryLabel = () => {
-                      if (payload().avoidTolls) {
-                        return stopCount() > 0
-                          ? `Sans péage · ${stopCount()} étape${stopCount() > 1 ? "s" : ""}`
-                          : "Mode sans péage";
-                      }
-                      const parts: string[] = [];
-                      if (stopCount() > 0) {
-                        parts.push(`${stopCount()} étape${stopCount() > 1 ? "s" : ""}`);
-                      }
-                      if (splitExportCount() > 0) {
-                        parts.push(
-                          `${splitExportCount()} sortie${splitExportCount() > 1 ? "s" : ""} péage`,
-                        );
-                      }
-                      if (bypassExportCount() > 0) {
-                        parts.push(
-                          `${bypassExportCount()} détour${bypassExportCount() > 1 ? "s" : ""}`,
-                        );
-                      }
-                      return parts.length > 0 ? `Inclut ${parts.join(" + ")}` : "Trajet direct";
-                    };
-
-                    return (
-                      <section class="space-y-2 rounded-2xl border border-slate-800/90 bg-slate-900/60 p-3">
-                        <div class="flex items-center justify-between gap-2">
-                          <div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-300">
-                            <Navigation class="h-3.5 w-3.5 text-sky-400" />
-                            Exporter l’itinéraire
-                          </div>
-                          <span class="text-[10px] font-medium text-slate-400">
-                            {exportSummaryLabel()}
-                          </span>
-                        </div>
-
-                        <div class="grid grid-cols-2 gap-1.5">
-                          <a
-                            href={buildGoogleMapsUrl(payload())}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            class="flex items-center justify-between rounded-xl border border-slate-700/80 bg-slate-950/80 px-2.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-sky-500/60 hover:bg-slate-900 hover:text-white"
-                          >
-                            <span>Google Maps</span>
-                            <ExternalLink class="h-3.5 w-3.5 text-sky-400" />
-                          </a>
-
-                          <a
-                            href={buildAppleMapsUrl(payload())}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            class="flex items-center justify-between rounded-xl border border-slate-700/80 bg-slate-950/80 px-2.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-sky-500/60 hover:bg-slate-900 hover:text-white"
-                          >
-                            <span>Apple Plans</span>
-                            <ExternalLink class="h-3.5 w-3.5 text-slate-300" />
-                          </a>
-
-                          <a
-                            href={buildWazeUrl(payload())}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            title={
-                              waypoints().length > 0
-                                ? "Waze ouvre uniquement la destination finale via lien web"
-                                : "Ouvrir la navigation dans Waze"
-                            }
-                            class="flex items-center justify-between rounded-xl border border-slate-700/80 bg-slate-950/80 px-2.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-cyan-500/60 hover:bg-slate-900 hover:text-white"
-                          >
-                            <span>Waze</span>
-                            <ExternalLink class="h-3.5 w-3.5 text-cyan-400" />
-                          </a>
-
-                          <button
-                            type="button"
-                            onClick={() => downloadGpxFile(payload())}
-                            class="flex items-center justify-between rounded-xl border border-emerald-500/40 bg-emerald-950/35 px-2.5 py-2 text-xs font-medium text-emerald-200 transition-colors hover:border-emerald-400/70 hover:bg-emerald-900/40 hover:text-white"
-                          >
-                            <span>Fichier GPX</span>
-                            <Download class="h-3.5 w-3.5 text-emerald-400" />
-                          </button>
-                        </div>
-
-                        <Show when={waypoints().length > 0}>
-                          <p class="text-[10px] text-slate-500">
-                            Google Maps, Apple Plans et GPX incluent vos étapes et sorties péage.
-                            Waze n’accepte que la destination via lien.
-                          </p>
-                        </Show>
-                      </section>
-                    );
-                  }}
-                </Show>
-
-                <section class="space-y-2.5">
-                  <div class="flex items-center justify-between">
-                    <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      Sections de péage ({summary().sections.length})
-                    </h2>
-                    <span class="text-[11px] text-slate-500">Choisissez où entrer / sortir</span>
-                  </div>
-
-                  <Show when={closedRuns().length > 0}>
-                    <div class="space-y-2">
-                      <For each={closedRuns()}>
-                        {(run) => {
-                          const indices = () =>
-                            resolveRunEntryExitIndices({
-                              run,
-                              override: props.runOverrides[run.id],
-                            });
-                          const isCustom = () =>
-                            indices().entryIdx > 0 || indices().exitIdx < run.plazas.length - 1;
-                          const totalSpan = () => Math.max(1, run.plazas.length - 1);
-                          const prePct = () => (indices().entryIdx / totalSpan()) * 100;
-                          const activePct = () =>
-                            ((indices().exitIdx - indices().entryIdx) / totalSpan()) * 100;
-                          const postPct = () =>
-                            ((totalSpan() - indices().exitIdx) / totalSpan()) * 100;
-
-                          return (
-                            <Show when={run.plazas.length >= 3}>
-                              <div class="rounded-xl border border-slate-800/90 bg-slate-900/75 p-2.5">
-                                <div class="flex items-center justify-between gap-2">
-                                  <div class="text-[11px] font-semibold text-slate-200">
-                                    Portion autoroute · {run.concessionaire} (
-                                    {run.highways.join(" / ")})
-                                  </div>
-                                  <Show when={isCustom()}>
-                                    <button
-                                      type="button"
-                                      onClick={() => props.onResetRunOverride(run.id)}
-                                      class="text-[10px] font-semibold text-sky-400 hover:text-sky-300"
-                                    >
-                                      Toute l’autoroute
-                                    </button>
-                                  </Show>
-                                </div>
-
-                                <div class="mt-2 flex h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
-                                  <Show when={prePct() > 0}>
-                                    <div
-                                      style={{ width: `${prePct()}%` }}
-                                      class="bg-amber-400/80 transition-all"
-                                      title="Hors péage avant l'entrée choisie"
-                                    />
-                                  </Show>
-                                  <div
-                                    style={{ width: `${activePct()}%` }}
-                                    class="bg-sky-400 transition-all"
-                                    title="Portion sur autoroute"
-                                  />
-                                  <Show when={postPct() > 0}>
-                                    <div
-                                      style={{ width: `${postPct()}%` }}
-                                      class="bg-amber-400/80 transition-all"
-                                      title="Hors péage après la sortie choisie"
-                                    />
-                                  </Show>
-                                </div>
-
-                                <div class="mt-2 grid grid-cols-2 gap-2">
-                                  <label class="space-y-1">
-                                    <span class="block text-[10px] font-medium text-slate-400">
-                                      Entrer à
-                                    </span>
-                                    <select
-                                      aria-label={`Entrer sur ${run.concessionaire}`}
-                                      value={run.plazas[indices().entryIdx]?.plaza.id ?? ""}
-                                      onChange={(event) =>
-                                        props.onSetRunEntry(run.id, event.currentTarget.value)
-                                      }
-                                      class="w-full truncate rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] font-medium text-slate-100 focus:border-sky-500 focus:outline-none"
-                                    >
-                                      <For each={run.plazas.slice(0, indices().exitIdx)}>
-                                        {(item, idx) => (
-                                          <option value={item.plaza.id}>
-                                            {idx() === 0
-                                              ? `${item.plaza.name} (début)`
-                                              : `${item.plaza.name} (${item.plaza.highway})`}
-                                          </option>
-                                        )}
-                                      </For>
-                                    </select>
-                                  </label>
-
-                                  <label class="space-y-1">
-                                    <span class="block text-[10px] font-medium text-slate-400">
-                                      Sortir à
-                                    </span>
-                                    <select
-                                      aria-label={`Sortir de ${run.concessionaire}`}
-                                      value={run.plazas[indices().exitIdx]?.plaza.id ?? ""}
-                                      onChange={(event) =>
-                                        props.onSetRunExit(run.id, event.currentTarget.value)
-                                      }
-                                      class="w-full truncate rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] font-medium text-slate-100 focus:border-sky-500 focus:outline-none"
-                                    >
-                                      <For each={run.plazas.slice(indices().entryIdx + 1)}>
-                                        {(item, idx) => {
-                                          const isLast =
-                                            indices().entryIdx + 1 + idx() ===
-                                            run.plazas.length - 1;
-                                          return (
-                                            <option value={item.plaza.id}>
-                                              {isLast
-                                                ? `${item.plaza.name} (fin)`
-                                                : `${item.plaza.name} (${item.plaza.highway})`}
-                                            </option>
-                                          );
-                                        }}
-                                      </For>
-                                    </select>
-                                  </label>
-                                </div>
-                              </div>
-                            </Show>
-                          );
-                        }}
-                      </For>
+                      </Show>
                     </div>
+                    <div class="mt-1.5 border-t border-slate-800 pt-1 text-[10px] tabular-nums text-slate-400">
+                      <Show when={props.tollFreeRoute} fallback="—">
+                        {formatDuration(tollFreeMinutes())} · {formatKm(tollFreeKm())}
+                      </Show>
+                    </div>
+                  </button>
+                </div>
+
+                {/* Quick objective mode selector */}
+                <div class="grid grid-cols-4 gap-1 rounded-xl border border-slate-800/90 bg-slate-900/60 p-1">
+                  <For each={PROFILE_OPTIONS}>
+                    {(profile) => {
+                      const isActive = () => props.activeProfile === profile.id;
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => props.onApplyProfile(profile.id)}
+                          class={`rounded-lg px-2 py-1 text-[11px] font-semibold transition-[background-color,color,transform] duration-150 active:scale-[0.97] ${
+                            isActive()
+                              ? profile.id === "free"
+                                ? "bg-violet-500/25 text-violet-200 ring-1 ring-violet-400/50"
+                                : profile.id === "fast"
+                                  ? "bg-sky-500/20 text-sky-200 ring-1 ring-sky-400/50"
+                                  : "bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-400/50"
+                              : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-200"
+                          }`}
+                        >
+                          {profile.label}
+                        </button>
+                      );
+                    }}
+                  </For>
+                </div>
+              </section>
+
+              {/* 2 clean tabs: Sections & Détours | Sorties malines */}
+              <div class="grid grid-cols-2 gap-1 rounded-xl border border-slate-800 bg-slate-900/80 p-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("sections")}
+                  class={`flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors ${
+                    activeTab() === "sections"
+                      ? "bg-slate-800 text-white shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <SlidersHorizontal class="h-3.5 w-3.5 text-sky-400" />
+                  <span>Sections ({summary().sections.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("splits")}
+                  class={`flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors ${
+                    activeTab() === "splits"
+                      ? "bg-slate-800 text-white shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <Scissors class="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Sorties malines</span>
+                  <Show when={summary().splitCount > 0}>
+                    <span class="rounded-full bg-emerald-500/25 px-1.5 py-0.25 text-[10px] font-bold tabular-nums text-emerald-300">
+                      {summary().splitCount}
+                    </span>
                   </Show>
-
-                  <Show
-                    when={summary().sections.length > 0}
-                    fallback={
-                      <div class="rounded-xl border border-slate-800 bg-slate-900/50 p-3 text-xs text-slate-400">
-                        Aucune section de péage détectée sur cet itinéraire.
-                      </div>
-                    }
-                  >
-                    <div class="space-y-2.5">
-                      <For each={summary().sections}>
-                        {(section) => {
-                          const isSelected = () => props.selectedSectionId === section.id;
-                          const detour = () => props.bypassDetours[section.id];
-                          const isLoadingDetour = () =>
-                            section.isBypassed && props.loadingBypassIds.has(section.id);
-                          const savedMinutes = () =>
-                            detour()?.extraMinutes ?? section.bypassExtraMinutes;
-                          const hourlyRateEur = () =>
-                            computeSectionHourlyRateEur({
-                              priceEur: section.basePriceEur,
-                              savedMinutes: savedMinutes(),
-                            });
-                          const isExactRate = () => Boolean(detour());
-
-                          return (
-                            <div
-                              onClick={() => props.onSelectSection(section.id)}
-                              class={`cursor-pointer rounded-xl border p-3 transition-all ${
-                                section.isBypassed
-                                  ? "border-amber-400/55 bg-amber-950/25"
-                                  : isSelected()
-                                    ? "border-sky-400/70 bg-slate-900"
-                                    : "border-slate-800 bg-slate-900/60 hover:border-slate-700"
-                              }`}
-                            >
-                              <div class="flex items-start justify-between gap-2">
-                                <div class="min-w-0 flex-1">
-                                  <div class="flex flex-wrap items-center gap-1.5">
-                                    <span class="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-bold text-sky-300">
-                                      {section.highway}
-                                    </span>
-                                    <span class="text-[10px] font-medium text-slate-400">
-                                      {section.concessionaire}
-                                    </span>
-                                    <Show when={section.isSplitStart || section.isSplitEnd}>
-                                      <span class="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
-                                        Fractionné
-                                      </span>
-                                    </Show>
-                                    <Show when={section.isBypassed}>
-                                      <span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
-                                        Hors péage
-                                      </span>
-                                    </Show>
-                                  </div>
-                                  <div class="mt-1 truncate text-xs font-semibold text-slate-100">
-                                    <Show
-                                      when={section.kind === "closed"}
-                                      fallback={`Barrière : ${section.fromPlaza.plaza.name}`}
-                                    >
-                                      {section.fromPlaza.plaza.name} → {section.toPlaza.plaza.name}
-                                    </Show>
-                                  </div>
-                                  <div class="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-slate-400">
-                                    <Show
-                                      when={section.kind === "closed"}
-                                      fallback={<span>Système ouvert</span>}
-                                    >
-                                      <span>{formatKm(section.distanceKm)}</span>
-                                      <Show
-                                        when={
-                                          section.basePriceEur !== null && section.distanceKm > 0
-                                        }
-                                      >
-                                        <span>
-                                          ·{" "}
-                                          {(section.basePriceEur! / section.distanceKm).toFixed(2)}{" "}
-                                          €/km
-                                        </span>
-                                      </Show>
-                                    </Show>
-                                    <Show when={hourlyRateEur()}>
-                                      {(rate) => (
-                                        <span
-                                          title={`Prendre cette section autoroute revient à ${isExactRate() ? "" : "~"}${formatEur(rate())} par heure gagnée par rapport au contournement hors péage`}
-                                          class={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                                            rate() >= 25
-                                              ? "bg-amber-500/15 text-amber-300"
-                                              : "bg-slate-800 text-slate-300"
-                                          }`}
-                                        >
-                                          {isExactRate() ? "" : "~"}
-                                          {formatEur(rate())}/h gagnée
-                                        </span>
-                                      )}
-                                    </Show>
-                                  </div>
-                                </div>
-
-                                <div class="flex shrink-0 flex-col items-end">
-                                  <Show
-                                    when={section.isBypassed}
-                                    fallback={
-                                      <span class="text-sm font-bold text-slate-100">
-                                        {section.basePriceEur !== null
-                                          ? formatEur(section.basePriceEur)
-                                          : "N/C"}
-                                      </span>
-                                    }
-                                  >
-                                    <span class="text-sm font-bold text-amber-300">0,00 €</span>
-                                    <Show when={section.basePriceEur !== null}>
-                                      <span class="text-[10px] text-slate-500 line-through">
-                                        {formatEur(section.basePriceEur!)}
-                                      </span>
-                                    </Show>
-                                  </Show>
-                                </div>
-                              </div>
-
-                              <div class="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-800/80 pt-2">
-                                <Show
-                                  when={section.isBypassed}
-                                  fallback={
-                                    <span class="text-[11px] text-slate-400">
-                                      Gain autoroute : ~{savedMinutes()} min
-                                    </span>
-                                  }
-                                >
-                                  <Show
-                                    when={!isLoadingDetour()}
-                                    fallback={
-                                      <span class="flex items-center gap-1.5 text-[11px] text-amber-300">
-                                        <Loader2 class="h-3 w-3 animate-spin" />
-                                        Calcul du contournement…
-                                      </span>
-                                    }
-                                  >
-                                    <span class="text-[11px] font-medium text-amber-200/90">
-                                      Détour : +{savedMinutes()} min
-                                      <Show when={detour()}>
-                                        {(d) =>
-                                          ` · ${d().extraDistanceKm >= 0 ? "+" : ""}${d().extraDistanceKm.toFixed(1)} km`
-                                        }
-                                      </Show>
-                                    </span>
-                                  </Show>
-                                </Show>
-
-                                <button
-                                  type="button"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    props.onToggleBypassSection(section.id);
-                                  }}
-                                  class={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
-                                    section.isBypassed
-                                      ? "border border-amber-400/50 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30"
-                                      : "border border-slate-700 bg-slate-800/90 text-slate-200 hover:border-amber-400/60 hover:bg-amber-950/40 hover:text-amber-200"
-                                  }`}
-                                >
-                                  {section.isBypassed
-                                    ? "Reprendre l’autoroute"
-                                    : "Contourner hors péage"}
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        }}
-                      </For>
-                    </div>
-                  </Show>
-                </section>
-
-                <Show when={closedRuns().length > 0 && props.dataset}>
-                  <section class="space-y-2.5 pb-4">
-                    <div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-300">
-                      <SlidersHorizontal class="h-3.5 w-3.5 text-emerald-400" />
-                      <span>Sorties intermédiaires</span>
-                      <InfoTooltip
-                        label="Explication des sorties intermédiaires"
-                        text="Sortir puis rerentrer au même échangeur permet parfois de payer moins cher grâce aux écarts de grille tarifaire. Les +4 min affichées sont une estimation moyenne à la volée."
-                      />
-                    </div>
-
-                    <div class="grid grid-cols-2 gap-1 rounded-xl border border-slate-800 bg-slate-900/70 p-1">
-                      <button
-                        type="button"
-                        onClick={() => setOnlyProfitableSplits(true)}
-                        class={`rounded-lg px-2 py-1 text-[11px] font-semibold transition-colors ${
-                          onlyProfitableSplits()
-                            ? "bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-500/40"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Rentables uniquement
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setOnlyProfitableSplits(false)}
-                        class={`rounded-lg px-2 py-1 text-[11px] font-semibold transition-colors ${
-                          !onlyProfitableSplits()
-                            ? "bg-sky-500/20 text-sky-200 ring-1 ring-sky-500/40"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Toutes les sorties
-                      </button>
-                    </div>
-
-                    <For each={closedRuns()}>
-                      {(run) => {
-                        const insights = () =>
-                          props.dataset
-                            ? evaluateIntermediateSplitCandidates({
-                                dataset: props.dataset,
-                                run,
-                                vehicleClass: props.vehicleClass,
-                                splitPlazaIds: props.splitPlazaIds,
-                                override: props.runOverrides[run.id],
-                              })
-                            : [];
-                        const profitableCount = () =>
-                          insights().filter(
-                            (item) => (item.savingsEur ?? 0) > 0.05 || item.isActive,
-                          ).length;
-                        const visibleInsights = () =>
-                          onlyProfitableSplits()
-                            ? insights().filter(
-                                (item) => (item.savingsEur ?? 0) > 0.05 || item.isActive,
-                              )
-                            : insights();
-                        const isCollapsed = () => collapsedRunIds().has(run.id);
-                        const activeSplitsInRun = () =>
-                          insights().filter((item) => item.isActive).length;
-
-                        return (
-                          <Show when={insights().length > 0}>
-                            <div class="rounded-xl border border-slate-800 bg-slate-900/50">
-                              <button
-                                type="button"
-                                onClick={() => toggleRunCollapsed(run.id)}
-                                class="flex w-full items-center justify-between px-3 py-2.5 text-left"
-                              >
-                                <div>
-                                  <div class="text-xs font-semibold text-slate-200">
-                                    {run.concessionaire} ({run.highways.join(" / ")})
-                                  </div>
-                                  <div class="text-[11px] text-slate-400">
-                                    <span class="text-emerald-300">
-                                      {profitableCount()} rentable
-                                      {profitableCount() > 1 ? "s" : ""}
-                                    </span>{" "}
-                                    sur {insights().length} · {activeSplitsInRun()} active
-                                    {activeSplitsInRun() > 1 ? "s" : ""}
-                                  </div>
-                                </div>
-                                <Show
-                                  when={!isCollapsed()}
-                                  fallback={<ChevronDown class="h-4 w-4 text-slate-400" />}
-                                >
-                                  <ChevronUp class="h-4 w-4 text-slate-400" />
-                                </Show>
-                              </button>
-
-                              <Show when={!isCollapsed()}>
-                                <div class="max-h-64 space-y-1 overflow-y-auto border-t border-slate-800 p-2">
-                                  <Show
-                                    when={visibleInsights().length > 0}
-                                    fallback={
-                                      <div class="px-2 py-2 text-center text-[11px] text-slate-400">
-                                        Aucune sortie rentable sur ce tronçon. Cliquez « Toutes les
-                                        sorties » pour les voir quand même.
-                                      </div>
-                                    }
-                                  >
-                                    <For each={visibleInsights()}>
-                                      {(item) => {
-                                        const isProfitable = () => (item.savingsEur ?? 0) > 0.05;
-                                        return (
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              props.onToggleSplitPlaza(item.matched.plaza.id)
-                                            }
-                                            class={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${
-                                              item.isActive
-                                                ? "bg-emerald-500/20 text-emerald-100 ring-1 ring-emerald-500/50"
-                                                : isProfitable()
-                                                  ? "bg-slate-900/90 text-slate-200 hover:bg-emerald-950/40"
-                                                  : "text-slate-400 hover:bg-slate-800/70"
-                                            }`}
-                                          >
-                                            <div class="min-w-0 flex-1">
-                                              <div class="truncate font-medium">
-                                                {item.matched.plaza.name}
-                                              </div>
-                                              <div class="text-[10px] text-slate-500">
-                                                {item.matched.plaza.highway}
-                                                {item.matched.plaza.exitNumber
-                                                  ? ` · n°${item.matched.plaza.exitNumber}`
-                                                  : ""}
-                                                <Show when={item.savingsPerHourEur}>
-                                                  {(rate) => ` · ${formatEur(rate())}/h`}
-                                                </Show>
-                                              </div>
-                                            </div>
-
-                                            <div class="flex shrink-0 items-center gap-2">
-                                              <Show when={item.savingsEur !== null}>
-                                                <span
-                                                  class={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
-                                                    isProfitable()
-                                                      ? "bg-emerald-500/20 text-emerald-300"
-                                                      : "bg-slate-800 text-slate-400"
-                                                  }`}
-                                                >
-                                                  {item.savingsEur! > 0
-                                                    ? `-${formatEur(item.savingsEur!)}`
-                                                    : item.savingsEur! < 0
-                                                      ? `+${formatEur(Math.abs(item.savingsEur!))}`
-                                                      : "0,00 €"}
-                                                </span>
-                                              </Show>
-                                              <span
-                                                class={`flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold ${
-                                                  item.isActive
-                                                    ? "bg-emerald-500 text-slate-950"
-                                                    : "border border-slate-700 text-slate-300"
-                                                }`}
-                                              >
-                                                <Scissors class="h-3 w-3" />
-                                                {item.isActive ? "Actif" : "+4m"}
-                                              </span>
-                                            </div>
-                                          </button>
-                                        );
-                                      }}
-                                    </For>
-                                  </Show>
-                                </div>
-                              </Show>
-                            </div>
-                          </Show>
-                        );
-                      }}
-                    </For>
-                  </section>
-                </Show>
+                </button>
               </div>
-            );
-          }}
+
+              <Show when={activeTab() === "sections"}>
+                <TollSectionsTab
+                  closedRuns={closedRuns()}
+                  sections={summary().sections}
+                  runOverrides={props.runOverrides}
+                  bypassStates={props.bypassStates}
+                  selectedSectionId={props.selectedSectionId}
+                  hoveredSectionId={props.hoveredSectionId}
+                  scrollToSelectedToken={props.scrollToSelectedToken}
+                  onSetRunEntry={props.onSetRunEntry}
+                  onSetRunExit={props.onSetRunExit}
+                  onResetRunOverride={props.onResetRunOverride}
+                  onToggleBypassSection={props.onToggleBypassSection}
+                  onRetryBypassSection={props.onRetryBypassSection}
+                  onSelectSection={props.onSelectSection}
+                  onHoverSection={props.onHoverSection}
+                />
+              </Show>
+
+              <Show when={activeTab() === "splits"}>
+                <SmartSplitsTab
+                  dataset={props.dataset}
+                  closedRuns={closedRuns()}
+                  vehicleClass={props.vehicleClass}
+                  splitExtraMinutes={props.splitExtraMinutes}
+                  hasTelepeage={props.hasTelepeage}
+                  optimization={props.optimization}
+                  maxAddedMinutes={props.maxAddedMinutes}
+                  onChangeMaxAddedMinutes={props.onChangeMaxAddedMinutes}
+                  onApplyOptimization={props.onApplyOptimization}
+                  splitPlazaIds={props.splitPlazaIds}
+                  onToggleSplitPlaza={props.onToggleSplitPlaza}
+                  runOverrides={props.runOverrides}
+                  hasManualBypasses={hasManualBypasses()}
+                />
+              </Show>
+            </div>
+          )}
         </Show>
       </div>
+
+      {/* Sticky Export Footer */}
+      <Show when={props.mobileSheetMode !== "peek"}>
+        <RouteExportBar exportInput={exportInput()} onCopyShareLink={props.onCopyShareLink} />
+      </Show>
     </aside>
   );
 };

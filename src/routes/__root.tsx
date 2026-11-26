@@ -12,12 +12,18 @@ export const Route = createRootRouteWithContext<{
   head: () => ({
     meta: [
       { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
+      {
+        name: "viewport",
+        content:
+          "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
+      },
+      { name: "theme-color", content: "#020617" },
+      { name: "color-scheme", content: "dark" },
       { title: "PeageMap — Optimiseur interactif de péages autoroutiers France" },
       {
         name: "description",
         content:
-          "Visualisez chaque section de péage sur la carte, fractionnez vos sorties en un clic et optimisez le coût de vos trajets autoroutiers en France.",
+          "Visualisez chaque section de péage sur la carte, optimisez vos sorties en un clic et calculez le meilleur coût de vos trajets autoroutiers en France.",
       },
     ],
     links: [{ rel: "stylesheet", href: appCss }],
@@ -35,7 +41,7 @@ const RootDocument = (props: Readonly<{ children: JSX.Element }>) => (
       <HydrationScript />
       <HeadContent />
     </head>
-    <body class="bg-slate-950 text-slate-100 antialiased selection:bg-emerald-500/30 selection:text-emerald-200 overflow-hidden">
+    <body class="overflow-hidden bg-slate-950 text-slate-100 antialiased selection:bg-emerald-500/30 selection:text-emerald-200">
       <ErrorBoundary
         fallback={(error) => (
           <div class="flex h-dvh w-screen items-center justify-center bg-slate-950 p-6 text-rose-200">

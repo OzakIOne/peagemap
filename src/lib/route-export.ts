@@ -1,4 +1,8 @@
-import { buildCumulativeDistancesKm, projectPointToRoute } from "~/domain/geo";
+import {
+  buildCumulativeDistancesKm,
+  projectPointToRoute,
+  samplePointsAlongPolyline,
+} from "~/domain/geo";
 import type {
   BypassDetour,
   MatchedTollUnit,
@@ -93,22 +97,57 @@ export const collectOrderedExportWaypoints = (input: RouteExportInput): ExportWa
   for (const section of input.sections ?? []) {
     if (!section.isBypassed) continue;
     const detour = input.bypassDetours?.[section.id];
-    const midCoord = detour?.coordinates[Math.floor(detour.coordinates.length / 2)];
-    if (!midCoord) continue;
-    const midDistanceKm =
-      (section.fromPlaza.distanceAlongRouteKm + section.toPlaza.distanceAlongRouteKm) / 2;
-    items.push({
-      name: `Contournement ${section.fromPlaza.plaza.name} → ${section.toPlaza.plaza.name}`,
-      lat: midCoord[1],
-      lon: midCoord[0],
-      kind: "bypass",
-      distanceAlongRouteKm: midDistanceKm,
+    if (!detour || detour.coordinates.length < 2) continue;
+
+    const detourKm = detour.distanceMeters / 1000;
+    const fractions = detourKm >= 25 ? [0.25, 0.5, 0.75] : detourKm >= 10 ? [0.33, 0.67] : [0.5];
+    const sampled = samplePointsAlongPolyline({
+      coordinates: detour.coordinates,
+      fractions,
     });
+
+    const startKm = section.fromPlaza.distanceAlongRouteKm;
+    const endKm = Math.max(startKm + 0.1, section.toPlaza.distanceAlongRouteKm);
+
+    for (let i = 0; i < sampled.length; i += 1) {
+      const coord = sampled[i];
+      const frac = fractions[i] ?? 0.5;
+      if (!coord) continue;
+      items.push({
+        name: `Contournement ${section.fromPlaza.plaza.name} → ${section.toPlaza.plaza.name}`,
+        lat: coord[1],
+        lon: coord[0],
+        kind: "bypass",
+        distanceAlongRouteKm: startKm + (endKm - startKm) * frac,
+      });
+    }
   }
 
   items.sort((a, b) => a.distanceAlongRouteKm - b.distanceAlongRouteKm);
 
   return items.map(({ name, lat, lon, kind }) => ({ name, lat, lon, kind }));
+};
+
+export const getExportWarnings = (input: RouteExportInput): string[] => {
+  const warnings: string[] = [];
+  if (!input.avoidTolls) {
+    const missingBypassCount = (input.sections ?? []).filter(
+      (section) => section.isBypassed && !input.bypassDetours?.[section.id],
+    ).length;
+    if (missingBypassCount > 0) {
+      warnings.push(
+        `${missingBypassCount} contournement${missingBypassCount > 1 ? "s" : ""} encore en cours de calcul ou indisponible${missingBypassCount > 1 ? "s" : ""}.`,
+      );
+    }
+
+    const totalWaypoints = collectOrderedExportWaypoints(input).length;
+    if (totalWaypoints > GOOGLE_MAPS_MAX_WAYPOINTS) {
+      warnings.push(
+        `Google Maps limite à ${GOOGLE_MAPS_MAX_WAYPOINTS} étapes (${totalWaypoints} actives) : utilisez le fichier GPX pour le tracé complet.`,
+      );
+    }
+  }
+  return warnings;
 };
 
 const capWaypoints = (waypoints: ExportWaypoint[], limit: number): ExportWaypoint[] => {
@@ -140,6 +179,10 @@ export const buildGoogleMapsUrl = (input: RouteExportInput): string => {
   );
   url.searchParams.set("travelmode", "driving");
 
+  if (input.avoidTolls) {
+    url.searchParams.set("avoid", "tolls");
+  }
+
   const waypoints = capWaypoints(collectOrderedExportWaypoints(input), GOOGLE_MAPS_MAX_WAYPOINTS);
   if (waypoints.length > 0) {
     url.searchParams.set(
@@ -148,21 +191,17 @@ export const buildGoogleMapsUrl = (input: RouteExportInput): string => {
     );
   }
 
-  if (input.avoidTolls) {
-    url.searchParams.set("avoid", "tolls");
-  }
-
   return url.toString();
 };
 
 export const buildAppleMapsUrl = (input: RouteExportInput): string => {
   const waypoints = collectOrderedExportWaypoints(input);
   const saddr = `${formatCoord(input.origin.lat)},${formatCoord(input.origin.lon)}`;
-  const daddrStops = [
+  const destinations = [
     ...waypoints.map((wp) => `${formatCoord(wp.lat)},${formatCoord(wp.lon)}`),
     `${formatCoord(input.destination.lat)},${formatCoord(input.destination.lon)}`,
   ];
-  return `https://maps.apple.com/?saddr=${saddr}&daddr=${daddrStops.join("+to:")}&dirflg=d`;
+  return `https://maps.apple.com/?saddr=${saddr}&daddr=${destinations.join("+to:")}&dirflg=d`;
 };
 
 export const buildWazeUrl = (input: RouteExportInput): string => {
@@ -173,6 +212,49 @@ export const buildWazeUrl = (input: RouteExportInput): string => {
   );
   url.searchParams.set("navigate", "yes");
   return url.toString();
+};
+
+export const buildCopilotChecklistText = (input: RouteExportInput): string => {
+  const lines: string[] = [
+    `Itinéraire PeageMap : ${input.origin.label} → ${input.destination.label}`,
+  ];
+
+  if (input.avoidTolls) {
+    lines.push("Mode : Sans péage (0,00 €)");
+    return lines.join("\n");
+  }
+
+  const actions: string[] = [];
+  for (const unit of input.units) {
+    if (unit.kind !== "closed") continue;
+    for (let i = 1; i < unit.plazas.length - 1; i += 1) {
+      const matched = unit.plazas[i];
+      if (!matched || !input.splitPlazaIds.has(matched.plaza.id)) continue;
+      const exitLabel = matched.plaza.exitNumber ? ` (sortie n°${matched.plaza.exitNumber})` : "";
+      actions.push(
+        `✂ Sortir puis rerentrer à ${matched.plaza.name}${exitLabel} — ${matched.plaza.highway}`,
+      );
+    }
+  }
+
+  for (const section of input.sections ?? []) {
+    if (!section.isBypassed) continue;
+    if (section.kind === "open") {
+      actions.push(`↪ Éviter la barrière ${section.fromPlaza.plaza.name} (${section.highway})`);
+    } else {
+      actions.push(
+        `↪ Éviter par nationale : ${section.fromPlaza.plaza.name} → ${section.toPlaza.plaza.name} (${section.highway})`,
+      );
+    }
+  }
+
+  if (actions.length === 0) {
+    lines.push("Trajet autoroute direct (aucune sortie intermédiaire ni détour).");
+  } else {
+    lines.push("", ...actions);
+  }
+
+  return lines.join("\n");
 };
 
 export const buildGpxFilename = (params: {
@@ -187,11 +269,14 @@ const buildStitchedTrackCoordinates = (input: RouteExportInput): Array<[number, 
 
   const activeBypassSpans = input.sections
     .filter((section) => section.isBypassed && Boolean(input.bypassDetours?.[section.id]))
-    .map((section) => ({
-      startIdx: section.fromPlaza.routeCoordIndex,
-      endIdx: section.toPlaza.routeCoordIndex,
-      detourCoords: input.bypassDetours?.[section.id]?.coordinates ?? [],
-    }))
+    .map((section) => {
+      const detour = input.bypassDetours?.[section.id];
+      return {
+        startIdx: detour?.startCoordIndex ?? section.fromPlaza.routeCoordIndex,
+        endIdx: detour?.endCoordIndex ?? section.toPlaza.routeCoordIndex,
+        detourCoords: detour?.coordinates ?? [],
+      };
+    })
     .filter((span) => span.detourCoords.length > 1)
     .sort((a, b) => a.startIdx - b.startIdx);
 

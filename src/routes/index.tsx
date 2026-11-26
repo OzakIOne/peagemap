@@ -1,18 +1,64 @@
 import { createQuery } from "@tanstack/solid-query";
 import { createFileRoute } from "@tanstack/solid-router";
 import { createEffect, createMemo, createSignal, onMount } from "solid-js";
-import { RouteSidebar, type RouteStopItem } from "~/components/route-sidebar";
+import { z } from "zod";
+import { RouteSidebar, type MobileSheetMode, type RouteStopItem } from "~/components/route-sidebar";
 import { TollMap } from "~/components/toll-map";
-import { evaluateRouteTolls, optimizeTollSplits } from "~/domain/toll-calculator";
+import { buildCumulativeDistancesKm, findCoordIndexAtDistanceOffset } from "~/domain/geo";
+import {
+  computeProfileOptimization,
+  getSplitExtraMinutes,
+  matchRouteTollUnits,
+  optimizeTollSplits,
+  priceMatchedTollUnits,
+} from "~/domain/toll-calculator";
 import {
   TollDatasetSchema,
-  type BypassDetour,
+  VehicleClassSchema,
+  type BypassDetourState,
+  type OptimizationProfile,
   type PlaceSuggestion,
   type RunEntryExitOverride,
   type TollDataset,
   type VehicleClass,
 } from "~/domain/toll-types";
-import { computeBypassSegment, computeDualRoutes } from "~/server/routing";
+import {
+  computeBypassSegment,
+  computeHighwayRoute,
+  computeTollFreeRoute,
+  reverseGeocode,
+} from "~/server/routing";
+
+const SearchParamsSchema = z.object({
+  from: z.string().optional(),
+  to: z.string().optional(),
+  stops: z.string().optional(),
+  vc: VehicleClassSchema.optional(),
+  tp: z.enum(["0", "1"]).optional(),
+  splits: z.string().optional(),
+  bypasses: z.string().optional(),
+  tf: z.enum(["0", "1"]).optional(),
+});
+
+const encodePlaceParam = (place: PlaceSuggestion): string =>
+  `${place.label}|${place.lat.toFixed(5)}|${place.lon.toFixed(5)}`;
+
+const decodePlaceParam = (raw: string | undefined, prefix: string): PlaceSuggestion | null => {
+  if (!raw) return null;
+  const parts = raw.split("|");
+  if (parts.length < 3) return null;
+  const lon = Number(parts[parts.length - 1]);
+  const lat = Number(parts[parts.length - 2]);
+  const label = parts.slice(0, -2).join("|").trim();
+  if (!label || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  return {
+    id: `${prefix}-${lat.toFixed(4)}-${lon.toFixed(4)}`,
+    label,
+    subtitle: "Partagé par lien",
+    lat,
+    lon,
+  };
+};
 
 const fetchTollDataset = async (): Promise<TollDataset> => {
   const response = await fetch("/data/tolls-fr-2026.json");
@@ -26,29 +72,102 @@ const fetchTollDataset = async (): Promise<TollDataset> => {
 let stopIdCounter = 0;
 
 const HomePage = () => {
+  const search = Route.useSearch();
+
   const [hydrated, setHydrated] = createSignal(false);
   const [origin, setOrigin] = createSignal<PlaceSuggestion | null>(null);
   const [destination, setDestination] = createSignal<PlaceSuggestion | null>(null);
   const [stops, setStops] = createSignal<RouteStopItem[]>([]);
   const [vehicleClass, setVehicleClass] = createSignal<VehicleClass>("c1");
+  const [hasTelepeage, setHasTelepeage] = createSignal(false);
   const [splitPlazaIds, setSplitPlazaIds] = createSignal<Set<string>>(new Set());
   const [bypassedSectionIds, setBypassedSectionIds] = createSignal<Set<string>>(new Set());
   const [runOverrides, setRunOverrides] = createSignal<Record<string, RunEntryExitOverride>>({});
-  const [bypassDetours, setBypassDetours] = createSignal<Record<string, BypassDetour>>({});
-  const [loadingBypassIds, setLoadingBypassIds] = createSignal<Set<string>>(new Set());
+  const [bypassStates, setBypassStates] = createSignal<Record<string, BypassDetourState>>({});
   const [maxAddedMinutes, setMaxAddedMinutes] = createSignal(12);
   const [showTollFree, setShowTollFree] = createSignal(false);
+  const [activeProfile, setActiveProfile] = createSignal<OptimizationProfile | null>("fast");
   const [selectedSectionId, setSelectedSectionId] = createSignal<string | null>(null);
+  const [hoveredSectionId, setHoveredSectionId] = createSignal<string | null>(null);
+  const [focusSectionToken, setFocusSectionToken] = createSignal(0);
+  const [scrollToSelectedToken, setScrollToSelectedToken] = createSignal(0);
+  const [mobileSheetMode, setMobileSheetMode] = createSignal<MobileSheetMode>("half");
+
+  let skipNextRouteReset = false;
 
   onMount(() => {
+    const initial = search();
+    const initialOrigin = decodePlaceParam(initial.from, "url-origin");
+    const initialDest = decodePlaceParam(initial.to, "url-dest");
+    if (initialOrigin && initialDest) {
+      skipNextRouteReset = true;
+      setOrigin(initialOrigin);
+      setDestination(initialDest);
+      if (initial.stops) {
+        const parsedStops = initial.stops
+          .split(";")
+          .map((item, idx) => decodePlaceParam(item, `url-stop-${idx}`))
+          .filter((place): place is PlaceSuggestion => place !== null)
+          .map((place) => {
+            stopIdCounter += 1;
+            return { id: `stop-${stopIdCounter}`, place };
+          });
+        setStops(parsedStops);
+      }
+      if (initial.vc) setVehicleClass(initial.vc);
+      if (initial.tp === "1") setHasTelepeage(true);
+      if (initial.tf === "1") {
+        setShowTollFree(true);
+        setActiveProfile("free");
+      }
+      if (initial.splits) {
+        setSplitPlazaIds(new Set(initial.splits.split(",").filter(Boolean)));
+        setActiveProfile(null);
+      }
+      if (initial.bypasses) {
+        setBypassedSectionIds(new Set(initial.bypasses.split(",").filter(Boolean)));
+        setActiveProfile(null);
+      }
+    }
     setHydrated(true);
   });
+
+  const splitExtraMinutes = () => getSplitExtraMinutes(hasTelepeage());
 
   const activeStops = createMemo<PlaceSuggestion[]>(() =>
     stops()
       .map((stop) => stop.place)
       .filter((place): place is PlaceSuggestion => place !== null),
   );
+
+  // Sync URL query params cleanly via replaceState
+  createEffect(() => {
+    if (!hydrated() || typeof window === "undefined") return;
+    const from = origin();
+    const to = destination();
+    const params = new URLSearchParams();
+    if (from) params.set("from", encodePlaceParam(from));
+    if (to) params.set("to", encodePlaceParam(to));
+    const validStops = activeStops();
+    if (validStops.length > 0) {
+      params.set("stops", validStops.map(encodePlaceParam).join(";"));
+    }
+    if (vehicleClass() !== "c1") params.set("vc", vehicleClass());
+    if (hasTelepeage()) params.set("tp", "1");
+    if (showTollFree()) params.set("tf", "1");
+    if (splitPlazaIds().size > 0) {
+      params.set("splits", Array.from(splitPlazaIds()).join(","));
+    }
+    if (bypassedSectionIds().size > 0) {
+      params.set("bypasses", Array.from(bypassedSectionIds()).join(","));
+    }
+
+    const qs = params.toString();
+    const nextUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+    if (`${window.location.pathname}${window.location.search}` !== nextUrl) {
+      window.history.replaceState(null, "", nextUrl);
+    }
+  });
 
   const datasetQuery = createQuery(() => ({
     queryKey: ["toll-dataset", "fr-2026"],
@@ -57,19 +176,52 @@ const HomePage = () => {
     staleTime: Infinity,
   }));
 
-  const routeQuery = createQuery(() => {
+  const routePointsKey = createMemo(() => {
+    const from = origin();
+    const to = destination();
+    if (!from || !to) return "";
+    const wpKey = activeStops()
+      .map((s) => `${s.lon.toFixed(4)},${s.lat.toFixed(4)}`)
+      .join(";");
+    return `${from.lon.toFixed(4)},${from.lat.toFixed(4)}|${wpKey}|${to.lon.toFixed(4)},${to.lat.toFixed(4)}`;
+  });
+
+  const highwayQuery = createQuery(() => {
     const from = origin();
     const to = destination();
     const waypoints = activeStops().map((stop) => ({ lon: stop.lon, lat: stop.lat }));
-    const waypointsKey = waypoints.map((wp) => `${wp.lon},${wp.lat}`).join(";");
+    const key = routePointsKey();
 
     return {
-      queryKey: ["dual-routes", from?.lon, from?.lat, waypointsKey, to?.lon, to?.lat],
+      queryKey: ["highway-route", key],
       queryFn: () => {
         if (!from || !to) {
           throw new Error("Sélectionnez un départ et une arrivée");
         }
-        return computeDualRoutes({
+        return computeHighwayRoute({
+          data: {
+            origin: { lon: from.lon, lat: from.lat },
+            destination: { lon: to.lon, lat: to.lat },
+            waypoints,
+          },
+        });
+      },
+      enabled: hydrated() && Boolean(from && to),
+      staleTime: 10 * 60_000,
+    };
+  });
+
+  const tollFreeQuery = createQuery(() => {
+    const from = origin();
+    const to = destination();
+    const waypoints = activeStops().map((stop) => ({ lon: stop.lon, lat: stop.lat }));
+    const key = routePointsKey();
+
+    return {
+      queryKey: ["toll-free-route", key],
+      queryFn: () => {
+        if (!from || !to) return null;
+        return computeTollFreeRoute({
           data: {
             origin: { lon: from.lon, lat: from.lat },
             destination: { lon: to.lon, lat: to.lat },
@@ -85,131 +237,171 @@ const HomePage = () => {
   let routeGeneration = 0;
 
   createEffect(() => {
-    const _from = origin();
-    const _to = destination();
-    const _stopsKey = activeStops()
-      .map((stop) => `${stop.lon},${stop.lat}`)
-      .join(";");
-    if (_from || _to || _stopsKey.length > 0) {
-      routeGeneration += 1;
-      setSplitPlazaIds(new Set<string>());
-      setBypassedSectionIds(new Set<string>());
-      setRunOverrides({});
-      setBypassDetours({});
-      setLoadingBypassIds(new Set<string>());
-      setSelectedSectionId(null);
+    const key = routePointsKey();
+    if (!key) return;
+    if (skipNextRouteReset) {
+      skipNextRouteReset = false;
+      return;
     }
+    routeGeneration += 1;
+    setSplitPlazaIds(new Set<string>());
+    setBypassedSectionIds(new Set<string>());
+    setRunOverrides({});
+    setBypassStates({});
+    setSelectedSectionId(null);
+    setHoveredSectionId(null);
+    setActiveProfile(showTollFree() ? "free" : "fast");
   });
 
   const dataset = () => (datasetQuery.isSuccess ? datasetQuery.data : null);
-  const routeData = () =>
-    routeQuery.isSuccess && origin() && destination() ? routeQuery.data : null;
+  const highwayRoute = () =>
+    highwayQuery.isSuccess && origin() && destination() ? highwayQuery.data : null;
+  const tollFreeRoute = () =>
+    tollFreeQuery.isSuccess && origin() && destination() ? tollFreeQuery.data : null;
 
-  const summary = createMemo(() => {
+  // Memo 1: Heavy geometric matching (runs only on route / dataset / vehicleClass change)
+  const matchedUnits = createMemo(() => {
     const ds = dataset();
-    const highway = routeData()?.highway;
-    if (!ds || !highway) return null;
-    return evaluateRouteTolls({
+    const highway = highwayRoute();
+    if (!ds || !highway) return [];
+    return matchRouteTollUnits({
       dataset: ds,
       coordinates: highway.coordinates,
+      vehicleClass: vehicleClass(),
+    });
+  });
+
+  // Memo 2: Fast pricing pass (runs on splits / bypasses / overrides / télépéage)
+  const summary = createMemo(() => {
+    const ds = dataset();
+    const highway = highwayRoute();
+    if (!ds || !highway) return null;
+    return priceMatchedTollUnits({
+      dataset: ds,
+      coordinates: highway.coordinates,
+      units: matchedUnits(),
       vehicleClass: vehicleClass(),
       splitPlazaIds: splitPlazaIds(),
       bypassedSectionIds: bypassedSectionIds(),
       runOverrides: runOverrides(),
+      splitExtraMinutes: splitExtraMinutes(),
     });
   });
 
   const optimization = createMemo(() => {
     const ds = dataset();
-    const currentSummary = summary();
-    if (!ds || !currentSummary) return null;
+    const units = matchedUnits();
+    if (!ds || units.length === 0) return null;
     return optimizeTollSplits({
       dataset: ds,
-      units: currentSummary.units,
+      units,
       vehicleClass: vehicleClass(),
       maxAddedMinutes: maxAddedMinutes(),
+      runOverrides: runOverrides(),
+      splitExtraMinutes: splitExtraMinutes(),
     });
   });
 
-  createEffect(() => {
+  const fetchBypassForSection = (sectionId: string) => {
     const currentSummary = summary();
-    const highway = routeData()?.highway;
+    const highway = highwayRoute();
     if (!currentSummary || !highway) return;
+    const section = currentSummary.sections.find((s) => s.id === sectionId);
+    if (!section || !section.isBypassed) return;
 
-    const cached = bypassDetours();
-    const loading = loadingBypassIds();
     const generation = routeGeneration;
-    const totalHighwayKm = highway.distanceMeters / 1000;
-    const totalHighwayMinutes = highway.durationSeconds / 60;
+    let fromPoint = { lon: section.fromPlaza.plaza.lon, lat: section.fromPlaza.plaza.lat };
+    let toPoint = { lon: section.toPlaza.plaza.lon, lat: section.toPlaza.plaza.lat };
+    let startCoordIndex = section.fromPlaza.routeCoordIndex;
+    let endCoordIndex = section.toPlaza.routeCoordIndex;
+    let replacedHighwayKm = section.distanceKm;
 
-    for (const section of currentSummary.sections) {
-      if (!section.isBypassed) continue;
-      if (cached[section.id] || loading.has(section.id)) continue;
-
-      let fromPoint = { lon: section.fromPlaza.plaza.lon, lat: section.fromPlaza.plaza.lat };
-      let toPoint = { lon: section.toPlaza.plaza.lon, lat: section.toPlaza.plaza.lat };
-
-      if (section.kind === "open") {
-        const startIdx = Math.max(0, section.fromPlaza.routeCoordIndex - 15);
-        const endIdx = Math.min(
-          highway.coordinates.length - 1,
-          section.toPlaza.routeCoordIndex + 15,
-        );
-        const startCoord = highway.coordinates[startIdx];
-        const endCoord = highway.coordinates[endIdx];
-        if (startCoord && endCoord) {
-          fromPoint = { lon: startCoord[0], lat: startCoord[1] };
-          toPoint = { lon: endCoord[0], lat: endCoord[1] };
-        }
-      }
-
-      setLoadingBypassIds((prev) => {
-        const next = new Set(prev);
-        next.add(section.id);
-        return next;
+    if (section.kind === "open") {
+      const cumulative = buildCumulativeDistancesKm(highway.coordinates);
+      startCoordIndex = findCoordIndexAtDistanceOffset({
+        cumulativeDistancesKm: cumulative,
+        originIndex: section.fromPlaza.routeCoordIndex,
+        deltaKm: -3.0,
       });
+      endCoordIndex = findCoordIndexAtDistanceOffset({
+        cumulativeDistancesKm: cumulative,
+        originIndex: section.toPlaza.routeCoordIndex,
+        deltaKm: 3.0,
+      });
+      const startCoord = highway.coordinates[startCoordIndex];
+      const endCoord = highway.coordinates[endCoordIndex];
+      if (startCoord && endCoord) {
+        fromPoint = { lon: startCoord[0], lat: startCoord[1] };
+        toPoint = { lon: endCoord[0], lat: endCoord[1] };
+      }
+      replacedHighwayKm = Math.max(
+        0,
+        (cumulative[endCoordIndex] ?? 0) - (cumulative[startCoordIndex] ?? 0),
+      );
+    }
 
-      void computeBypassSegment({
-        data: { from: fromPoint, to: toPoint },
-      })
-        .then((detourRoute) => {
-          if (generation !== routeGeneration) return;
-          if (!detourRoute || detourRoute.coordinates.length < 2) return;
+    setBypassStates((prev) => ({
+      ...prev,
+      [section.id]: { status: "loading" },
+    }));
 
-          const highwaySectionMinutes =
-            section.kind === "open"
-              ? 3
-              : totalHighwayKm > 0
-                ? (section.distanceKm / totalHighwayKm) * totalHighwayMinutes
-                : (section.distanceKm / 115) * 60;
-          const extraMinutes = Math.max(
-            1,
-            Math.round(detourRoute.durationSeconds / 60 - highwaySectionMinutes),
-          );
-          const extraDistanceKm =
-            Math.round((detourRoute.distanceMeters / 1000 - section.distanceKm) * 10) / 10;
-
-          setBypassDetours((prev) => ({
+    void computeBypassSegment({
+      data: { from: fromPoint, to: toPoint },
+    })
+      .then((detourRoute) => {
+        if (generation !== routeGeneration) return;
+        if (!detourRoute || detourRoute.coordinates.length < 2) {
+          setBypassStates((prev) => ({
             ...prev,
-            [section.id]: {
+            [section.id]: { status: "error", message: "Itinéraire hors péage indisponible" },
+          }));
+          return;
+        }
+
+        const highwaySectionMinutes = (replacedHighwayKm / 115) * 60;
+        const extraMinutes = Math.max(
+          1,
+          Math.round(detourRoute.durationSeconds / 60 - highwaySectionMinutes),
+        );
+        const extraDistanceKm =
+          Math.round((detourRoute.distanceMeters / 1000 - replacedHighwayKm) * 10) / 10;
+
+        setBypassStates((prev) => ({
+          ...prev,
+          [section.id]: {
+            status: "ready",
+            detour: {
               sectionId: section.id,
               coordinates: detourRoute.coordinates,
               distanceMeters: detourRoute.distanceMeters,
               durationSeconds: detourRoute.durationSeconds,
               extraMinutes,
               extraDistanceKm,
+              startCoordIndex,
+              endCoordIndex,
             },
-          }));
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          if (generation !== routeGeneration) return;
-          setLoadingBypassIds((prev) => {
-            const next = new Set(prev);
-            next.delete(section.id);
-            return next;
-          });
-        });
+          },
+        }));
+      })
+      .catch(() => {
+        if (generation !== routeGeneration) return;
+        setBypassStates((prev) => ({
+          ...prev,
+          [section.id]: { status: "error", message: "Erreur réseau lors du calcul" },
+        }));
+      });
+  };
+
+  // Auto-fetch bypass detours once per bypassed section (never loops on error!)
+  createEffect(() => {
+    const currentSummary = summary();
+    if (!currentSummary) return;
+    const states = bypassStates();
+
+    for (const section of currentSummary.sections) {
+      if (!section.isBypassed) continue;
+      if (states[section.id]) continue;
+      fetchBypassForSection(section.id);
     }
   });
 
@@ -233,21 +425,36 @@ const HomePage = () => {
 
   const handleMoveStop = (stopId: string, direction: "up" | "down") => {
     setStops((prev) => {
-      const index = prev.findIndex((stop) => stop.id === stopId);
-      if (index === -1) return prev;
-      const targetIndex = direction === "up" ? index - 1 : index + 1;
-      if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+      const idx = prev.findIndex((stop) => stop.id === stopId);
+      if (idx < 0) return prev;
+      const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
       const next = [...prev];
-      const current = next[index];
-      const target = next[targetIndex];
+      const current = next[idx];
+      const target = next[targetIdx];
       if (!current || !target) return prev;
-      next[index] = target;
-      next[targetIndex] = current;
+      next[idx] = target;
+      next[targetIdx] = current;
       return next;
     });
   };
 
+  const handleSwapPlaces = () => {
+    const prevOrigin = origin();
+    const prevDestination = destination();
+    setOrigin(prevDestination);
+    setDestination(prevOrigin);
+    setStops((prev) => [...prev].reverse());
+  };
+
+  const handleSelectPreset = (from: PlaceSuggestion, to: PlaceSuggestion) => {
+    setStops([]);
+    setOrigin(from);
+    setDestination(to);
+  };
+
   const handleToggleSplitPlaza = (plazaId: string) => {
+    setActiveProfile(null);
     setSplitPlazaIds((prev) => {
       const next = new Set(prev);
       if (next.has(plazaId)) {
@@ -260,73 +467,57 @@ const HomePage = () => {
   };
 
   const handleSetRunEntry = (runId: string, plazaId: string | undefined) => {
-    const unit = summary()?.units.find((u) => u.id === runId && u.kind === "closed");
+    setActiveProfile(null);
     setRunOverrides((prev) => {
-      const current = prev[runId] ?? {};
-      let nextExit = current.exitPlazaId;
-      if (unit && unit.kind === "closed" && plazaId && nextExit) {
-        const entryIdx = unit.plazas.findIndex((p) => p.plaza.id === plazaId);
-        const exitIdx = unit.plazas.findIndex((p) => p.plaza.id === nextExit);
-        if (entryIdx >= exitIdx) {
-          nextExit = undefined;
-        }
-      }
-      const nextEntry =
-        unit && unit.kind === "closed" && plazaId === unit.plazas[0]?.plaza.id
-          ? undefined
-          : plazaId;
-      if (!nextEntry && !nextExit) {
-        const rest = { ...prev };
-        delete rest[runId];
+      const existing = prev[runId] ?? {};
+      const nextEntry = plazaId;
+      if (!nextEntry && !existing.exitPlazaId) {
+        const { [runId]: _removed, ...rest } = prev;
         return rest;
       }
-      return { ...prev, [runId]: { entryPlazaId: nextEntry, exitPlazaId: nextExit } };
+      return {
+        ...prev,
+        [runId]: { ...existing, entryPlazaId: nextEntry },
+      };
     });
   };
 
   const handleSetRunExit = (runId: string, plazaId: string | undefined) => {
-    const unit = summary()?.units.find((u) => u.id === runId && u.kind === "closed");
+    setActiveProfile(null);
     setRunOverrides((prev) => {
-      const current = prev[runId] ?? {};
-      let nextEntry = current.entryPlazaId;
-      if (unit && unit.kind === "closed" && plazaId && nextEntry) {
-        const entryIdx = unit.plazas.findIndex((p) => p.plaza.id === nextEntry);
-        const exitIdx = unit.plazas.findIndex((p) => p.plaza.id === plazaId);
-        if (exitIdx <= entryIdx) {
-          nextEntry = undefined;
-        }
-      }
-      const lastId =
-        unit && unit.kind === "closed" ? unit.plazas[unit.plazas.length - 1]?.plaza.id : undefined;
-      const nextExit = plazaId === lastId ? undefined : plazaId;
-      if (!nextEntry && !nextExit) {
-        const rest = { ...prev };
-        delete rest[runId];
+      const existing = prev[runId] ?? {};
+      const nextExit = plazaId;
+      if (!existing.entryPlazaId && !nextExit) {
+        const { [runId]: _removed, ...rest } = prev;
         return rest;
       }
-      return { ...prev, [runId]: { entryPlazaId: nextEntry, exitPlazaId: nextExit } };
+      return {
+        ...prev,
+        [runId]: { ...existing, exitPlazaId: nextExit },
+      };
     });
   };
 
   const handleResetRunOverride = (runId: string) => {
+    setActiveProfile(null);
     setRunOverrides((prev) => {
-      if (!prev[runId]) return prev;
-      const next = { ...prev };
-      delete next[runId];
-      return next;
+      const { [runId]: _removed, ...rest } = prev;
+      return rest;
     });
   };
 
   const handleToggleBypassSection = (sectionId: string) => {
-    const section = summary()?.sections.find((item) => item.id === sectionId);
-    if (section?.bypassRole === "before-entry") {
-      handleSetRunEntry(section.runId, undefined);
+    setActiveProfile(null);
+    const currentSection = summary()?.sections.find((section) => section.id === sectionId);
+    if (currentSection?.bypassRole === "before-entry") {
+      handleSetRunEntry(currentSection.runId, undefined);
       return;
     }
-    if (section?.bypassRole === "after-exit") {
-      handleSetRunExit(section.runId, undefined);
+    if (currentSection?.bypassRole === "after-exit") {
+      handleSetRunExit(currentSection.runId, undefined);
       return;
     }
+
     setBypassedSectionIds((prev) => {
       const next = new Set(prev);
       if (next.has(sectionId)) {
@@ -341,26 +532,80 @@ const HomePage = () => {
   const handleApplyOptimization = () => {
     const opt = optimization();
     if (!opt) return;
-    setBypassedSectionIds(new Set<string>());
-    setRunOverrides({});
+    setActiveProfile(null);
+    setShowTollFree(false);
     setSplitPlazaIds(new Set(opt.splitPlazaIds));
+  };
+
+  const handleApplyProfile = (profile: OptimizationProfile) => {
+    const ds = dataset();
+    const highway = highwayRoute();
+    const units = matchedUnits();
+    if (!ds || !highway) return;
+
+    const result = computeProfileOptimization({
+      dataset: ds,
+      coordinates: highway.coordinates,
+      units,
+      vehicleClass: vehicleClass(),
+      profile,
+      splitExtraMinutes: splitExtraMinutes(),
+    });
+
+    setRunOverrides({});
+    setSplitPlazaIds(new Set(result.splitPlazaIds));
+    setBypassedSectionIds(new Set(result.bypassedSectionIds));
+    setShowTollFree(result.showTollFree);
+    setActiveProfile(profile);
   };
 
   const handleResetCustomizations = () => {
     setSplitPlazaIds(new Set<string>());
     setBypassedSectionIds(new Set<string>());
     setRunOverrides({});
+    setSelectedSectionId(null);
+    setActiveProfile("fast");
   };
 
-  const handleSwapPlaces = () => {
-    const currentOrigin = origin();
-    const currentDestination = destination();
-    setOrigin(currentDestination);
-    setDestination(currentOrigin);
-    setStops((prev) => [...prev].reverse());
+  const handleSelectSection = (sectionId: string, fromMap = false) => {
+    setSelectedSectionId(sectionId);
+    if (fromMap) {
+      setScrollToSelectedToken((n) => n + 1);
+      if (mobileSheetMode() === "peek") {
+        setMobileSheetMode("half");
+      }
+    } else {
+      setFocusSectionToken((n) => n + 1);
+    }
   };
 
-  const datasetStats = createMemo(() => {
+  const handleMapPickPoint = (
+    role: "origin" | "stop" | "destination",
+    point: { lat: number; lon: number },
+  ) => {
+    void reverseGeocode({ data: point }).then((place) => {
+      if (role === "origin") {
+        setOrigin(place);
+      } else if (role === "destination") {
+        setDestination(place);
+      } else if (stops().length < 8) {
+        stopIdCounter += 1;
+        setStops((prev) => [...prev, { id: `stop-${stopIdCounter}`, place }]);
+      }
+    });
+  };
+
+  const handleCopyShareLink = async (): Promise<boolean> => {
+    if (typeof window === "undefined" || !navigator.clipboard) return false;
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const datasetStats = () => {
     const ds = dataset();
     if (!ds) return null;
     return {
@@ -368,19 +613,19 @@ const HomePage = () => {
       tariffCount: Object.keys(ds.tariffs).length,
       version: ds.version,
     };
-  });
+  };
 
   return (
-    <main class="flex h-dvh w-screen overflow-hidden bg-slate-950 text-slate-100">
+    <main class="relative flex h-dvh w-screen overflow-hidden bg-slate-950">
       <RouteSidebar
         dataset={dataset()}
         datasetStats={datasetStats()}
         origin={origin()}
         destination={destination()}
         stops={stops()}
-        onSelectOrigin={setOrigin}
+        onSelectOrigin={(place) => setOrigin(place)}
         onClearOrigin={() => setOrigin(null)}
-        onSelectDestination={setDestination}
+        onSelectDestination={(place) => setDestination(place)}
         onClearDestination={() => setDestination(null)}
         onAddStop={handleAddStop}
         onSelectStop={handleSelectStop}
@@ -388,67 +633,87 @@ const HomePage = () => {
         onRemoveStop={handleRemoveStop}
         onMoveStop={handleMoveStop}
         onSwapPlaces={handleSwapPlaces}
-        onSelectPreset={(from, to) => {
-          setOrigin(from);
-          setDestination(to);
-          setStops([]);
-        }}
+        onSelectPreset={handleSelectPreset}
         vehicleClass={vehicleClass()}
-        onChangeVehicleClass={setVehicleClass}
-        isLoadingRoute={
-          (routeQuery.isFetching || datasetQuery.isFetching) &&
-          !summary() &&
-          Boolean(origin() && destination())
-        }
+        onChangeVehicleClass={(cls) => setVehicleClass(cls)}
+        hasTelepeage={hasTelepeage()}
+        onToggleTelepeage={() => {
+          const next = !hasTelepeage();
+          setHasTelepeage(next);
+          setMaxAddedMinutes(next ? 6 : 12);
+        }}
+        splitExtraMinutes={splitExtraMinutes()}
+        isLoadingRoute={highwayQuery.isFetching && !highwayRoute()}
+        isFetchingRoute={highwayQuery.isFetching}
+        isLoadingTollFree={tollFreeQuery.isFetching && !tollFreeRoute()}
         routeError={
-          routeQuery.error instanceof Error
-            ? routeQuery.error.message
-            : datasetQuery.error instanceof Error
-              ? datasetQuery.error.message
-              : null
+          highwayQuery.isError
+            ? highwayQuery.error instanceof Error
+              ? highwayQuery.error.message
+              : "Erreur lors du calcul de l’itinéraire."
+            : null
         }
-        highwayRoute={routeData()?.highway ?? null}
-        tollFreeRoute={routeData()?.tollFree ?? null}
+        highwayRoute={highwayRoute()}
+        tollFreeRoute={tollFreeRoute()}
         showTollFree={showTollFree()}
-        onToggleShowTollFree={() => setShowTollFree((v) => !v)}
+        onSetShowTollFree={(show) => {
+          setShowTollFree(show);
+          if (show) setActiveProfile("free");
+          else if (activeProfile() === "free") setActiveProfile(null);
+        }}
         summary={summary()}
         runOverrides={runOverrides()}
         onSetRunEntry={handleSetRunEntry}
         onSetRunExit={handleSetRunExit}
         onResetRunOverride={handleResetRunOverride}
-        bypassDetours={bypassDetours()}
-        loadingBypassIds={loadingBypassIds()}
+        bypassStates={bypassStates()}
         optimization={optimization()}
         maxAddedMinutes={maxAddedMinutes()}
-        onChangeMaxAddedMinutes={setMaxAddedMinutes}
+        onChangeMaxAddedMinutes={(minutes) => setMaxAddedMinutes(minutes)}
         onApplyOptimization={handleApplyOptimization}
+        onApplyProfile={handleApplyProfile}
+        activeProfile={activeProfile()}
         onResetCustomizations={handleResetCustomizations}
         splitPlazaIds={splitPlazaIds()}
         onToggleSplitPlaza={handleToggleSplitPlaza}
         onToggleBypassSection={handleToggleBypassSection}
+        onRetryBypassSection={fetchBypassForSection}
         selectedSectionId={selectedSectionId()}
-        onSelectSection={setSelectedSectionId}
+        hoveredSectionId={hoveredSectionId()}
+        scrollToSelectedToken={scrollToSelectedToken()}
+        onSelectSection={(id) => handleSelectSection(id, false)}
+        onHoverSection={(id) => setHoveredSectionId(id)}
+        onCopyShareLink={handleCopyShareLink}
+        mobileSheetMode={mobileSheetMode()}
+        onChangeMobileSheetMode={(mode) => setMobileSheetMode(mode)}
       />
 
-      <section class="relative flex-1">
+      <section class="relative h-full w-full flex-1 bg-slate-900">
         <TollMap
+          dataset={dataset()}
+          vehicleClass={vehicleClass()}
+          splitExtraMinutes={splitExtraMinutes()}
           origin={origin()}
           destination={destination()}
           stops={activeStops()}
-          highwayRoute={routeData()?.highway ?? null}
-          tollFreeRoute={routeData()?.tollFree ?? null}
+          highwayRoute={highwayRoute()}
+          tollFreeRoute={tollFreeRoute()}
           showTollFree={showTollFree()}
-          units={summary()?.units ?? []}
+          units={matchedUnits()}
           sections={summary()?.sections ?? []}
           runOverrides={runOverrides()}
           onSetRunEntry={handleSetRunEntry}
           onSetRunExit={handleSetRunExit}
-          bypassDetours={bypassDetours()}
-          loadingBypassIds={loadingBypassIds()}
+          bypassStates={bypassStates()}
           splitPlazaIds={splitPlazaIds()}
           selectedSectionId={selectedSectionId()}
+          hoveredSectionId={hoveredSectionId()}
+          focusSectionToken={focusSectionToken()}
           onToggleSplitPlaza={handleToggleSplitPlaza}
-          onSelectSection={setSelectedSectionId}
+          onToggleBypassSection={handleToggleBypassSection}
+          onSelectSection={(id, fromMap) => handleSelectSection(id, fromMap)}
+          onHoverSection={(id) => setHoveredSectionId(id)}
+          onMapPickPoint={handleMapPickPoint}
         />
       </section>
     </main>
@@ -456,5 +721,6 @@ const HomePage = () => {
 };
 
 export const Route = createFileRoute("/")({
+  validateSearch: (search) => SearchParamsSchema.parse(search),
   component: HomePage,
 });

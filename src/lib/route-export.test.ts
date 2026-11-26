@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest";
-import type { MatchedTollUnit, PlaceSuggestion, RouteGeometry } from "~/domain/toll-types";
+import type {
+  BypassDetour,
+  MatchedTollUnit,
+  PlaceSuggestion,
+  PricedTollSection,
+  RouteGeometry,
+} from "~/domain/toll-types";
 import {
   buildAppleMapsUrl,
+  buildCopilotChecklistText,
   buildGoogleMapsUrl,
   buildGpxContent,
   buildGpxFilename,
   buildWazeUrl,
   collectOrderedExportWaypoints,
+  getExportWarnings,
 } from "./route-export";
 
 const paris: PlaceSuggestion = {
@@ -201,5 +209,77 @@ describe("route-export", () => {
     expect(buildGpxFilename({ originLabel: "Château-Thierry", destinationLabel: "Mâcon" })).toBe(
       "peagemap-chateau-thierry-macon.gpx",
     );
+  });
+
+  it("samples multiple waypoints along long bypass detours, stitches exact GPX spans, and reports warnings", () => {
+    const firstUnit = sampleUnits[0];
+    if (!firstUnit || firstUnit.kind !== "closed") return;
+    const fromPlaza = firstUnit.plazas[1]!;
+    const toPlaza = firstUnit.plazas[2]!;
+
+    const bypassedSection: PricedTollSection = {
+      id: "sec:aprr-run:auxerre->macon",
+      runId: "aprr-run",
+      kind: "closed",
+      concessionaire: "APRR",
+      highway: "A6",
+      fromPlaza,
+      toPlaza,
+      distanceKm: 240,
+      basePriceEur: 20,
+      effectivePriceEur: 0,
+      isBypassed: true,
+      bypassRole: "manual",
+      isSplitStart: false,
+      isSplitEnd: false,
+      isFreeFlow: false,
+      bypassExtraMinutes: 45,
+      coordinates: sampleRoute.coordinates.slice(1, 4),
+    };
+
+    const detour: BypassDetour = {
+      sectionId: bypassedSection.id,
+      coordinates: [
+        [3.57, 47.82],
+        [4.1, 47.4],
+        [4.5, 46.9],
+        [4.81, 46.28],
+      ],
+      distanceMeters: 260_000,
+      durationSeconds: 12_000,
+      extraMinutes: 40,
+      extraDistanceKm: 20,
+      startCoordIndex: 1,
+      endCoordIndex: 3,
+    };
+
+    const inputWithDetour = {
+      origin: paris,
+      destination: lyon,
+      stops: [],
+      route: sampleRoute,
+      units: sampleUnits,
+      sections: [bypassedSection],
+      bypassDetours: { [bypassedSection.id]: detour },
+      splitPlazaIds: new Set<string>(),
+      avoidTolls: false,
+    };
+
+    const wps = collectOrderedExportWaypoints(inputWithDetour);
+    expect(wps.filter((w) => w.kind === "bypass")).toHaveLength(3);
+    expect(getExportWarnings(inputWithDetour)).toEqual([]);
+
+    const missingDetourWarnings = getExportWarnings({
+      ...inputWithDetour,
+      bypassDetours: {},
+    });
+    expect(missingDetourWarnings[0]).toContain("1 contournement");
+
+    const gpx = buildGpxContent(inputWithDetour);
+    expect(gpx).toContain('<trkpt lat="47.400000" lon="4.100000" />');
+    expect(gpx).not.toContain('<trkpt lat="47.322000" lon="5.041500" />');
+
+    const checklist = buildCopilotChecklistText(inputWithDetour);
+    expect(checklist).toContain("Éviter par nationale : Auxerre Nord → Mâcon Sud (A6)");
   });
 });

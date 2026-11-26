@@ -104,3 +104,70 @@ export const sliceRouteCoordinates = (
   }
   return coordinates.slice(clampedStart, clampedEnd + 1);
 };
+
+export const findCoordIndexAtDistanceOffset = (params: {
+  cumulativeDistancesKm: number[];
+  originIndex: number;
+  deltaKm: number;
+}): number => {
+  const { cumulativeDistancesKm, originIndex, deltaKm } = params;
+  if (cumulativeDistancesKm.length === 0) return 0;
+  const clampedOrigin = Math.max(0, Math.min(originIndex, cumulativeDistancesKm.length - 1));
+  const originKm = cumulativeDistancesKm[clampedOrigin] ?? 0;
+  const targetKm = originKm + deltaKm;
+
+  if (deltaKm >= 0) {
+    for (let i = clampedOrigin; i < cumulativeDistancesKm.length; i += 1) {
+      if ((cumulativeDistancesKm[i] ?? originKm) >= targetKm) return i;
+    }
+    return cumulativeDistancesKm.length - 1;
+  }
+
+  for (let i = clampedOrigin; i >= 0; i -= 1) {
+    if ((cumulativeDistancesKm[i] ?? originKm) <= targetKm) return i;
+  }
+  return 0;
+};
+
+export const samplePointsAlongPolyline = (params: {
+  coordinates: Array<[number, number]>;
+  fractions: number[];
+}): Array<[number, number]> => {
+  const { coordinates, fractions } = params;
+  if (coordinates.length === 0) return [];
+  if (coordinates.length === 1) {
+    const only = coordinates[0];
+    return only ? [only] : [];
+  }
+
+  const cumulative = buildCumulativeDistancesKm(coordinates);
+  const totalKm = cumulative[cumulative.length - 1] ?? 0;
+  if (totalKm <= 0) {
+    const mid = coordinates[Math.floor(coordinates.length / 2)];
+    return mid ? [mid] : [];
+  }
+
+  const sampled: Array<[number, number]> = [];
+  for (const fraction of fractions) {
+    const clamped = Math.max(0, Math.min(1, fraction));
+    const targetKm = totalKm * clamped;
+    let chosen = coordinates[coordinates.length - 1];
+    for (let i = 1; i < cumulative.length; i += 1) {
+      const segEnd = cumulative[i] ?? 0;
+      if (segEnd >= targetKm - 1e-9) {
+        const segStart = cumulative[i - 1] ?? 0;
+        const a = coordinates[i - 1];
+        const b = coordinates[i];
+        if (a && b && segEnd > segStart) {
+          const t = Math.max(0, Math.min(1, (targetKm - segStart) / (segEnd - segStart)));
+          chosen = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        } else {
+          chosen = b;
+        }
+        break;
+      }
+    }
+    if (chosen) sampled.push(chosen);
+  }
+  return sampled;
+};
