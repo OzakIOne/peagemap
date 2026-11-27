@@ -29,15 +29,23 @@ import {
   reverseGeocode,
 } from "~/lib/routing";
 
+const FlagParamSchema = z
+  .union([z.literal("0"), z.literal("1"), z.literal(0), z.literal(1), z.boolean()])
+  .transform((value): "0" | "1" => (value === "1" || value === 1 || value === true ? "1" : "0"))
+  .optional()
+  .catch(undefined);
+
+const OptionalStringParamSchema = z.string().optional().catch(undefined);
+
 const SearchParamsSchema = z.object({
-  from: z.string().optional(),
-  to: z.string().optional(),
-  stops: z.string().optional(),
-  vc: VehicleClassSchema.optional(),
-  tp: z.enum(["0", "1"]).optional(),
-  splits: z.string().optional(),
-  bypasses: z.string().optional(),
-  tf: z.enum(["0", "1"]).optional(),
+  from: OptionalStringParamSchema,
+  to: OptionalStringParamSchema,
+  stops: OptionalStringParamSchema,
+  vc: VehicleClassSchema.optional().catch(undefined),
+  tp: FlagParamSchema,
+  splits: OptionalStringParamSchema,
+  bypasses: OptionalStringParamSchema,
+  tf: FlagParamSchema,
 });
 
 const encodePlaceParam = (place: PlaceSuggestion): string =>
