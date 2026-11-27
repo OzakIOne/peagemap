@@ -485,8 +485,9 @@ export const TollMap = (props: TollMapProps) => {
 
   // Effect 1: Sync GeoJSON route & section lines
   createEffect(() => {
+    if (!mapReady()) return;
     const map = mapInstance;
-    if (!map || !mapReady()) return;
+    if (!map) return;
 
     ensureRouteLayers(map, darkStyle());
 
@@ -561,9 +562,10 @@ export const TollMap = (props: TollMapProps) => {
 
   // Effect 2: Sync DOM markers (independent of selectedSectionId/hoveredSectionId)
   createEffect(() => {
+    if (!mapReady()) return;
     const map = mapInstance;
     const ml = maplibreModule;
-    if (!map || !ml || !mapReady()) return;
+    if (!map || !ml) return;
 
     clearMarkers();
 
@@ -910,11 +912,12 @@ export const TollMap = (props: TollMapProps) => {
 
   // Effect 5: Smoothly focus a section when selected from the sidebar
   createEffect(() => {
+    if (!mapReady()) return;
     const token = props.focusSectionToken;
     const selectedId = props.selectedSectionId;
     const map = mapInstance;
     const ml = maplibreModule;
-    if (!token || !selectedId || !map || !ml || !mapReady()) return;
+    if (!token || !selectedId || !map || !ml) return;
 
     const section = props.sections.find((s) => s.id === selectedId);
     if (!section) return;
