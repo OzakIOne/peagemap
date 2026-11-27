@@ -27,7 +27,7 @@ import {
   computeHighwayRoute,
   computeTollFreeRoute,
   reverseGeocode,
-} from "~/server/routing";
+} from "~/lib/routing";
 
 const SearchParamsSchema = z.object({
   from: z.string().optional(),
@@ -61,7 +61,7 @@ const decodePlaceParam = (raw: string | undefined, prefix: string): PlaceSuggest
 };
 
 const fetchTollDataset = async (): Promise<TollDataset> => {
-  const response = await fetch("/data/tolls-fr-2026.json");
+  const response = await fetch(`${import.meta.env.BASE_URL}data/tolls-fr-2026.json`);
   if (!response.ok) {
     throw new Error(`Impossible de charger les tarifs péages (${response.status})`);
   }

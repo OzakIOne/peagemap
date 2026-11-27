@@ -1,4 +1,3 @@
-import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
 import type { PlaceSuggestion, RouteGeometry } from "~/domain/toll-types";
 
@@ -106,81 +105,77 @@ const parsePhotonFeatures = (
   return suggestions;
 };
 
-export const searchPlaces = createServerFn({ method: "GET" })
-  .validator((input: unknown) => GeocodeInputSchema.parse(input))
-  .handler(async ({ data }): Promise<PlaceSuggestion[]> => {
-    const cacheKey = data.query.toLowerCase();
-    const cached = geocodeCache.get(cacheKey);
-    if (cached) return cached;
+export const searchPlaces = async (input: {
+  data: { query: string };
+}): Promise<PlaceSuggestion[]> => {
+  const data = GeocodeInputSchema.parse(input.data);
+  const cacheKey = data.query.toLowerCase();
+  const cached = geocodeCache.get(cacheKey);
+  if (cached) return cached;
 
-    const url = new URL("https://photon.komoot.io/api/");
-    url.searchParams.set("q", data.query);
-    url.searchParams.set("limit", "6");
-    url.searchParams.set("lang", "fr");
-    url.searchParams.set("lat", "46.603354");
-    url.searchParams.set("lon", "1.888334");
-    url.searchParams.set("bbox", "-5.5,41.2,9.8,51.2");
+  const url = new URL("https://photon.komoot.io/api/");
+  url.searchParams.set("q", data.query);
+  url.searchParams.set("limit", "6");
+  url.searchParams.set("lang", "fr");
+  url.searchParams.set("lat", "46.603354");
+  url.searchParams.set("lon", "1.888334");
+  url.searchParams.set("bbox", "-5.5,41.2,9.8,51.2");
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        "User-Agent": "PeageMap/1.0 (https://github.com/OzakIOne/peagemap)",
-      },
-      signal: AbortSignal.timeout(PHOTON_TIMEOUT_MS),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Geocoding failed with status ${response.status}`);
-    }
-
-    const parsed = PhotonResponseSchema.parse(await response.json());
-    const suggestions = parsePhotonFeatures(parsed.features, data.query);
-    geocodeCache.set(cacheKey, suggestions);
-    return suggestions;
+  const response = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(PHOTON_TIMEOUT_MS),
   });
+
+  if (!response.ok) {
+    throw new Error(`Geocoding failed with status ${response.status}`);
+  }
+
+  const parsed = PhotonResponseSchema.parse(await response.json());
+  const suggestions = parsePhotonFeatures(parsed.features, data.query);
+  geocodeCache.set(cacheKey, suggestions);
+  return suggestions;
+};
 
 const CoordinatePointSchema = z.object({
   lon: z.number(),
   lat: z.number(),
 });
 
-export const reverseGeocode = createServerFn({ method: "GET" })
-  .validator((input: unknown) => CoordinatePointSchema.parse(input))
-  .handler(async ({ data }): Promise<PlaceSuggestion> => {
-    const fallback: PlaceSuggestion = {
-      id: `pin-${data.lon.toFixed(4)}-${data.lat.toFixed(4)}`,
-      label: `${data.lat.toFixed(4)}, ${data.lon.toFixed(4)}`,
-      subtitle: "Point sur la carte",
+export const reverseGeocode = async (input: {
+  data: { lon: number; lat: number };
+}): Promise<PlaceSuggestion> => {
+  const data = CoordinatePointSchema.parse(input.data);
+  const fallback: PlaceSuggestion = {
+    id: `pin-${data.lon.toFixed(4)}-${data.lat.toFixed(4)}`,
+    label: `${data.lat.toFixed(4)}, ${data.lon.toFixed(4)}`,
+    subtitle: "Point sur la carte",
+    lon: data.lon,
+    lat: data.lat,
+  };
+
+  try {
+    const url = new URL("https://photon.komoot.io/reverse");
+    url.searchParams.set("lat", String(data.lat));
+    url.searchParams.set("lon", String(data.lon));
+    url.searchParams.set("lang", "fr");
+
+    const response = await fetch(url.toString(), {
+      signal: AbortSignal.timeout(PHOTON_TIMEOUT_MS),
+    });
+
+    if (!response.ok) return fallback;
+    const parsed = PhotonResponseSchema.safeParse(await response.json());
+    if (!parsed.success) return fallback;
+    const first = parsePhotonFeatures(parsed.data.features, fallback.label)[0];
+    if (!first) return fallback;
+    return {
+      ...first,
       lon: data.lon,
       lat: data.lat,
     };
-
-    try {
-      const url = new URL("https://photon.komoot.io/reverse");
-      url.searchParams.set("lat", String(data.lat));
-      url.searchParams.set("lon", String(data.lon));
-      url.searchParams.set("lang", "fr");
-
-      const response = await fetch(url.toString(), {
-        headers: {
-          "User-Agent": "PeageMap/1.0 (https://github.com/OzakIOne/peagemap)",
-        },
-        signal: AbortSignal.timeout(PHOTON_TIMEOUT_MS),
-      });
-
-      if (!response.ok) return fallback;
-      const parsed = PhotonResponseSchema.safeParse(await response.json());
-      if (!parsed.success) return fallback;
-      const first = parsePhotonFeatures(parsed.data.features, fallback.label)[0];
-      if (!first) return fallback;
-      return {
-        ...first,
-        lon: data.lon,
-        lat: data.lat,
-      };
-    } catch {
-      return fallback;
-    }
-  });
+  } catch {
+    return fallback;
+  }
+};
 
 const RouteRequestSchema = z.object({
   origin: CoordinatePointSchema,
@@ -201,28 +196,25 @@ const OsrmResponseSchema = z.object({
   routes: z.array(OsrmRouteSchema),
 });
 
-const fetchOsrmSingle = async (params: {
-  points: Array<{ lon: number; lat: number }>;
+const OSRM_ENDPOINTS = [
+  "https://router.project-osrm.org/route/v1/driving",
+  "https://routing.openstreetmap.de/routed-car/route/v1/driving",
+] as const;
+
+const fetchOsrmFromEndpoint = async (params: {
+  endpoint: string;
+  coords: string;
   excludeToll: boolean;
 }): Promise<RouteGeometry | null> => {
-  const { points, excludeToll } = params;
-  const cacheKey = pointsCacheKey(excludeToll ? "osrm-free" : "osrm-hw", points);
-  const cached = routeCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-
   try {
-    const coords = points.map((point) => `${point.lon},${point.lat}`).join(";");
-    const url = new URL(`https://router.project-osrm.org/route/v1/driving/${coords}`);
+    const url = new URL(`${params.endpoint}/${params.coords}`);
     url.searchParams.set("overview", "full");
     url.searchParams.set("geometries", "geojson");
-    if (excludeToll) {
+    if (params.excludeToll) {
       url.searchParams.set("exclude", "toll");
     }
 
     const response = await fetch(url.toString(), {
-      headers: {
-        "User-Agent": "PeageMap/1.0 (https://github.com/OzakIOne/peagemap)",
-      },
       signal: AbortSignal.timeout(ROUTING_TIMEOUT_MS),
     });
 
@@ -233,16 +225,35 @@ const fetchOsrmSingle = async (params: {
     const best = parsed.data.routes[0];
     if (!best) return null;
 
-    const result: RouteGeometry = {
+    return {
       coordinates: best.geometry.coordinates,
       distanceMeters: best.distance,
       durationSeconds: best.duration,
     };
-    routeCache.set(cacheKey, result);
-    return result;
   } catch {
     return null;
   }
+};
+
+const fetchOsrmSingle = async (params: {
+  points: Array<{ lon: number; lat: number }>;
+  excludeToll: boolean;
+}): Promise<RouteGeometry | null> => {
+  const { points, excludeToll } = params;
+  const cacheKey = pointsCacheKey(excludeToll ? "osrm-free" : "osrm-hw", points);
+  const cached = routeCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const coords = points.map((point) => `${point.lon},${point.lat}`).join(";");
+  for (const endpoint of OSRM_ENDPOINTS) {
+    const result = await fetchOsrmFromEndpoint({ endpoint, coords, excludeToll });
+    if (result) {
+      routeCache.set(cacheKey, result);
+      return result;
+    }
+  }
+
+  return null;
 };
 
 const ValhallaResponseSchema = z.object({
@@ -304,7 +315,6 @@ const fetchValhallaTollFree = async (params: {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "PeageMap/1.0 (https://github.com/OzakIOne/peagemap)",
       },
       body: JSON.stringify({
         locations: points.map((point) => ({ lat: point.lat, lon: point.lon })),
@@ -341,60 +351,50 @@ const fetchValhallaTollFree = async (params: {
   }
 };
 
-export interface DualRouteResponse {
-  highway: RouteGeometry;
-  tollFree: RouteGeometry | null;
-}
+export const computeHighwayRoute = async (input: {
+  data: {
+    origin: { lon: number; lat: number };
+    destination: { lon: number; lat: number };
+    waypoints?: Array<{ lon: number; lat: number }>;
+  };
+}): Promise<RouteGeometry> => {
+  const data = RouteRequestSchema.parse(input.data);
+  const points = [data.origin, ...data.waypoints, data.destination];
+  const highway = await fetchOsrmSingle({ points, excludeToll: false });
+  if (!highway) {
+    throw new Error("Impossible de calculer l’itinéraire OSRM pour ces points.");
+  }
+  return highway;
+};
 
-export const computeHighwayRoute = createServerFn({ method: "GET" })
-  .validator((input: unknown) => RouteRequestSchema.parse(input))
-  .handler(async ({ data }): Promise<RouteGeometry> => {
-    const points = [data.origin, ...data.waypoints, data.destination];
-    const highway = await fetchOsrmSingle({ points, excludeToll: false });
-    if (!highway) {
-      throw new Error("Impossible de calculer l’itinéraire OSRM pour ces points.");
-    }
-    return highway;
-  });
-
-export const computeTollFreeRoute = createServerFn({ method: "GET" })
-  .validator((input: unknown) => RouteRequestSchema.parse(input))
-  .handler(async ({ data }): Promise<RouteGeometry | null> => {
-    const points = [data.origin, ...data.waypoints, data.destination];
-    const valhalla = await fetchValhallaTollFree({ points });
-    if (valhalla) return valhalla;
-    return fetchOsrmSingle({ points, excludeToll: true });
-  });
-
-export const computeDualRoutes = createServerFn({ method: "GET" })
-  .validator((input: unknown) => RouteRequestSchema.parse(input))
-  .handler(async ({ data }): Promise<DualRouteResponse> => {
-    const points = [data.origin, ...data.waypoints, data.destination];
-    const [highway, tollFree] = await Promise.all([
-      fetchOsrmSingle({ points, excludeToll: false }),
-      fetchValhallaTollFree({ points }),
-    ]);
-
-    if (!highway) {
-      throw new Error("Impossible de calculer l’itinéraire OSRM pour ces points.");
-    }
-
-    return {
-      highway,
-      tollFree,
-    };
-  });
+export const computeTollFreeRoute = async (input: {
+  data: {
+    origin: { lon: number; lat: number };
+    destination: { lon: number; lat: number };
+    waypoints?: Array<{ lon: number; lat: number }>;
+  };
+}): Promise<RouteGeometry | null> => {
+  const data = RouteRequestSchema.parse(input.data);
+  const points = [data.origin, ...data.waypoints, data.destination];
+  const valhalla = await fetchValhallaTollFree({ points });
+  if (valhalla) return valhalla;
+  return fetchOsrmSingle({ points, excludeToll: true });
+};
 
 const BypassSegmentRequestSchema = z.object({
   from: CoordinatePointSchema,
   to: CoordinatePointSchema,
 });
 
-export const computeBypassSegment = createServerFn({ method: "GET" })
-  .validator((input: unknown) => BypassSegmentRequestSchema.parse(input))
-  .handler(async ({ data }): Promise<RouteGeometry | null> => {
-    const points = [data.from, data.to];
-    const valhalla = await fetchValhallaTollFree({ points });
-    if (valhalla) return valhalla;
-    return fetchOsrmSingle({ points, excludeToll: true });
-  });
+export const computeBypassSegment = async (input: {
+  data: {
+    from: { lon: number; lat: number };
+    to: { lon: number; lat: number };
+  };
+}): Promise<RouteGeometry | null> => {
+  const data = BypassSegmentRequestSchema.parse(input.data);
+  const points = [data.from, data.to];
+  const valhalla = await fetchValhallaTollFree({ points });
+  if (valhalla) return valhalla;
+  return fetchOsrmSingle({ points, excludeToll: true });
+};

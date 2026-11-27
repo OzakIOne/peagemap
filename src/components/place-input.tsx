@@ -2,7 +2,7 @@ import { createQuery } from "@tanstack/solid-query";
 import { AlertCircle, Loader2, MapPin, X } from "lucide-solid";
 import { For, Show, createEffect, createSignal, createUniqueId, onCleanup } from "solid-js";
 import type { PlaceSuggestion } from "~/domain/toll-types";
-import { searchPlaces } from "~/server/routing";
+import { searchPlaces } from "~/lib/routing";
 
 interface PlaceInputProps {
   label: string;
