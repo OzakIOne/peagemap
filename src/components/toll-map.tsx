@@ -1,4 +1,4 @@
-import { LocateFixed, Moon, Sun } from "lucide-solid";
+import { LocateFixed, Moon, Sun, Undo2 } from "lucide-solid";
 import type * as maplibregl from "maplibre-gl";
 import maplibreWorkerCode from "maplibre-gl/dist/maplibre-gl-worker.mjs?raw";
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
@@ -65,6 +65,8 @@ export interface TollMapProps {
     role: "origin" | "stop" | "destination",
     point: { lat: number; lon: number },
   ) => void;
+  canUndo?: boolean;
+  onUndo?: () => void;
 }
 
 const emptyFeatureCollection = (): LineFeatureCollection => ({
@@ -966,6 +968,18 @@ export const TollMap = (props: TollMapProps) => {
 
       <div class="pointer-events-none absolute right-3 top-3 z-10 flex flex-col items-end gap-2 sm:right-4 sm:top-4">
         <div class="pointer-events-auto flex items-center gap-1.5">
+          <Show when={props.canUndo && props.onUndo}>
+            <button
+              type="button"
+              onClick={() => props.onUndo?.()}
+              title="Annuler la dernière modification (⌘Z / Ctrl+Z)"
+              class="flex items-center gap-1.5 rounded-xl border border-sky-500/50 bg-slate-950/90 px-2.5 py-2 text-xs font-medium text-sky-200 shadow-lg backdrop-blur-md transition-[background-color,border-color,color,transform] duration-150 ease-out hover:border-sky-400 hover:bg-slate-900 hover:text-white active:scale-[0.97]"
+            >
+              <Undo2 class="h-3.5 w-3.5 text-sky-400" />
+              <span>Annuler</span>
+            </button>
+          </Show>
+
           <Show when={props.highwayRoute}>
             <button
               type="button"

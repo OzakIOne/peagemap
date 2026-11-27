@@ -1,6 +1,6 @@
 import { createQuery } from "@tanstack/solid-query";
 import { createFileRoute } from "@tanstack/solid-router";
-import { createEffect, createMemo, createSignal, onMount } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { z } from "zod";
 import { RouteSidebar, type MobileSheetMode, type RouteStopItem } from "~/components/route-sidebar";
 import { TollMap } from "~/components/toll-map";
@@ -69,6 +69,16 @@ const fetchTollDataset = async (): Promise<TollDataset> => {
   return TollDatasetSchema.parse(json);
 };
 
+interface CustomizationSnapshot {
+  splitPlazaIds: string[];
+  bypassedSectionIds: string[];
+  runOverrides: Record<string, RunEntryExitOverride>;
+  showTollFree: boolean;
+  activeProfile: OptimizationProfile | null;
+}
+
+const MAX_UNDO_HISTORY = 30;
+
 let stopIdCounter = 0;
 
 const HomePage = () => {
@@ -92,6 +102,40 @@ const HomePage = () => {
   const [focusSectionToken, setFocusSectionToken] = createSignal(0);
   const [scrollToSelectedToken, setScrollToSelectedToken] = createSignal(0);
   const [mobileSheetMode, setMobileSheetMode] = createSignal<MobileSheetMode>("half");
+  const [undoStack, setUndoStack] = createSignal<CustomizationSnapshot[]>([]);
+
+  const cloneRunOverrides = (
+    overrides: Readonly<Record<string, RunEntryExitOverride>>,
+  ): Record<string, RunEntryExitOverride> => {
+    const copy: Record<string, RunEntryExitOverride> = {};
+    for (const [key, value] of Object.entries(overrides)) {
+      copy[key] = { ...value };
+    }
+    return copy;
+  };
+
+  const pushUndoSnapshot = () => {
+    const snapshot: CustomizationSnapshot = {
+      splitPlazaIds: Array.from(splitPlazaIds()),
+      bypassedSectionIds: Array.from(bypassedSectionIds()),
+      runOverrides: cloneRunOverrides(runOverrides()),
+      showTollFree: showTollFree(),
+      activeProfile: activeProfile(),
+    };
+    setUndoStack((prev) => [...prev.slice(-(MAX_UNDO_HISTORY - 1)), snapshot]);
+  };
+
+  const handleUndo = () => {
+    const stack = undoStack();
+    const last = stack[stack.length - 1];
+    if (!last) return;
+    setUndoStack(stack.slice(0, -1));
+    setSplitPlazaIds(new Set(last.splitPlazaIds));
+    setBypassedSectionIds(new Set(last.bypassedSectionIds));
+    setRunOverrides(cloneRunOverrides(last.runOverrides));
+    setShowTollFree(last.showTollFree);
+    setActiveProfile(last.activeProfile);
+  };
 
   let skipNextRouteReset = false;
 
@@ -130,6 +174,27 @@ const HomePage = () => {
       }
     }
     setHydrated(true);
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) return;
+      if (event.key.toLowerCase() !== "z") return;
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      if (undoStack().length === 0) return;
+      event.preventDefault();
+      handleUndo();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    onCleanup(() => {
+      window.removeEventListener("keydown", onKeyDown);
+    });
   });
 
   const splitExtraMinutes = () => getSplitExtraMinutes(hasTelepeage());
@@ -251,6 +316,7 @@ const HomePage = () => {
     setSelectedSectionId(null);
     setHoveredSectionId(null);
     setActiveProfile(showTollFree() ? "free" : "fast");
+    setUndoStack([]);
   });
 
   const dataset = () => (datasetQuery.isSuccess ? datasetQuery.data : null);
@@ -454,6 +520,7 @@ const HomePage = () => {
   };
 
   const handleToggleSplitPlaza = (plazaId: string) => {
+    pushUndoSnapshot();
     setActiveProfile(null);
     setSplitPlazaIds((prev) => {
       const next = new Set(prev);
@@ -467,6 +534,9 @@ const HomePage = () => {
   };
 
   const handleSetRunEntry = (runId: string, plazaId: string | undefined) => {
+    const currentEntry = runOverrides()[runId]?.entryPlazaId;
+    if (currentEntry === plazaId) return;
+    pushUndoSnapshot();
     setActiveProfile(null);
     setRunOverrides((prev) => {
       const existing = prev[runId] ?? {};
@@ -483,6 +553,9 @@ const HomePage = () => {
   };
 
   const handleSetRunExit = (runId: string, plazaId: string | undefined) => {
+    const currentExit = runOverrides()[runId]?.exitPlazaId;
+    if (currentExit === plazaId) return;
+    pushUndoSnapshot();
     setActiveProfile(null);
     setRunOverrides((prev) => {
       const existing = prev[runId] ?? {};
@@ -499,6 +572,8 @@ const HomePage = () => {
   };
 
   const handleResetRunOverride = (runId: string) => {
+    if (!runOverrides()[runId]) return;
+    pushUndoSnapshot();
     setActiveProfile(null);
     setRunOverrides((prev) => {
       const { [runId]: _removed, ...rest } = prev;
@@ -507,7 +582,6 @@ const HomePage = () => {
   };
 
   const handleToggleBypassSection = (sectionId: string) => {
-    setActiveProfile(null);
     const currentSection = summary()?.sections.find((section) => section.id === sectionId);
     if (currentSection?.bypassRole === "before-entry") {
       handleSetRunEntry(currentSection.runId, undefined);
@@ -518,6 +592,8 @@ const HomePage = () => {
       return;
     }
 
+    pushUndoSnapshot();
+    setActiveProfile(null);
     setBypassedSectionIds((prev) => {
       const next = new Set(prev);
       if (next.has(sectionId)) {
@@ -532,6 +608,7 @@ const HomePage = () => {
   const handleApplyOptimization = () => {
     const opt = optimization();
     if (!opt) return;
+    pushUndoSnapshot();
     setActiveProfile(null);
     setShowTollFree(false);
     setSplitPlazaIds(new Set(opt.splitPlazaIds));
@@ -543,6 +620,7 @@ const HomePage = () => {
     const units = matchedUnits();
     if (!ds || !highway) return;
 
+    pushUndoSnapshot();
     const result = computeProfileOptimization({
       dataset: ds,
       coordinates: highway.coordinates,
@@ -560,9 +638,19 @@ const HomePage = () => {
   };
 
   const handleResetCustomizations = () => {
+    if (
+      splitPlazaIds().size === 0 &&
+      bypassedSectionIds().size === 0 &&
+      Object.keys(runOverrides()).length === 0 &&
+      !showTollFree()
+    ) {
+      return;
+    }
+    pushUndoSnapshot();
     setSplitPlazaIds(new Set<string>());
     setBypassedSectionIds(new Set<string>());
     setRunOverrides({});
+    setShowTollFree(false);
     setSelectedSectionId(null);
     setActiveProfile("fast");
   };
@@ -657,6 +745,8 @@ const HomePage = () => {
         tollFreeRoute={tollFreeRoute()}
         showTollFree={showTollFree()}
         onSetShowTollFree={(show) => {
+          if (show === showTollFree()) return;
+          pushUndoSnapshot();
           setShowTollFree(show);
           if (show) setActiveProfile("free");
           else if (activeProfile() === "free") setActiveProfile(null);
@@ -673,6 +763,8 @@ const HomePage = () => {
         onApplyOptimization={handleApplyOptimization}
         onApplyProfile={handleApplyProfile}
         activeProfile={activeProfile()}
+        canUndo={undoStack().length > 0}
+        onUndo={handleUndo}
         onResetCustomizations={handleResetCustomizations}
         splitPlazaIds={splitPlazaIds()}
         onToggleSplitPlaza={handleToggleSplitPlaza}
@@ -714,6 +806,8 @@ const HomePage = () => {
           onSelectSection={(id, fromMap) => handleSelectSection(id, fromMap)}
           onHoverSection={(id) => setHoveredSectionId(id)}
           onMapPickPoint={handleMapPickPoint}
+          canUndo={undoStack().length > 0}
+          onUndo={handleUndo}
         />
       </section>
     </main>

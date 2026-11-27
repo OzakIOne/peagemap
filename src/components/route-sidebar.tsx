@@ -13,6 +13,7 @@ import {
   SlidersHorizontal,
   Trash2,
   Truck,
+  Undo2,
   Zap,
 } from "lucide-solid";
 import { For, Show, createSignal } from "solid-js";
@@ -87,6 +88,8 @@ interface RouteSidebarProps {
   onApplyOptimization: () => void;
   onApplyProfile: (profile: OptimizationProfile) => void;
   activeProfile: OptimizationProfile | null;
+  canUndo: boolean;
+  onUndo: () => void;
   onResetCustomizations: () => void;
   splitPlazaIds: ReadonlySet<string>;
   onToggleSplitPlaza: (plazaId: string) => void;
@@ -228,6 +231,18 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
         <div class="flex items-center gap-1.5">
           <Show when={props.isFetchingRoute && props.summary}>
             <Loader2 class="h-3.5 w-3.5 animate-spin text-sky-400" />
+          </Show>
+
+          <Show when={props.canUndo}>
+            <button
+              type="button"
+              onClick={() => props.onUndo()}
+              title="Annuler la dernière modification (⌘Z / Ctrl+Z)"
+              class="flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-950/50 px-2 py-1 text-[11px] font-medium text-sky-200 transition-[border-color,background-color,color,transform] duration-150 hover:border-sky-400/70 hover:bg-sky-900/60 hover:text-white active:scale-[0.97]"
+            >
+              <Undo2 class="h-3 w-3" />
+              <span>Annuler</span>
+            </button>
           </Show>
 
           <Show when={hasCustomizations()}>
