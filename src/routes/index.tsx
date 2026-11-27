@@ -444,7 +444,7 @@ const HomePage = () => {
     const prevDestination = destination();
     setOrigin(prevDestination);
     setDestination(prevOrigin);
-    setStops((prev) => [...prev].reverse());
+    setStops((prev) => prev.toReversed());
   };
 
   const handleSelectPreset = (from: PlaceSuggestion, to: PlaceSuggestion) => {

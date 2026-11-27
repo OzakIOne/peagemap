@@ -103,7 +103,7 @@ export const TollSectionsTab = (props: TollSectionsTabProps) => {
                             selectedId === firstId ? undefined : selectedId,
                           );
                         }}
-                        class="w-full rounded-lg border border-slate-700/90 bg-slate-950 px-2 py-1.5 text-[11px] font-medium text-slate-100 focus:border-sky-500 focus:outline-none"
+                        class="w-full rounded-lg border border-slate-700/90 bg-slate-950 px-2 py-1.5 text-[11px] font-medium text-slate-100 focus:border-sky-500"
                       >
                         <For each={entryOptions()}>
                           {(item, idx) => (
@@ -129,7 +129,7 @@ export const TollSectionsTab = (props: TollSectionsTabProps) => {
                             selectedId === lastId ? undefined : selectedId,
                           );
                         }}
-                        class="w-full rounded-lg border border-slate-700/90 bg-slate-950 px-2 py-1.5 text-[11px] font-medium text-slate-100 focus:border-sky-500 focus:outline-none"
+                        class="w-full rounded-lg border border-slate-700/90 bg-slate-950 px-2 py-1.5 text-[11px] font-medium text-slate-100 focus:border-sky-500"
                       >
                         <For each={exitOptions()}>
                           {(item) => {
@@ -207,7 +207,7 @@ export const TollSectionsTab = (props: TollSectionsTabProps) => {
                   <button
                     type="button"
                     onClick={() => props.onSelectSection(section.id)}
-                    class="flex w-full items-start justify-between gap-2 text-left focus:outline-none"
+                    class="flex w-full items-start justify-between gap-2 rounded-lg text-left"
                   >
                     <div class="min-w-0 flex-1">
                       <div class="flex flex-wrap items-center gap-1.5">

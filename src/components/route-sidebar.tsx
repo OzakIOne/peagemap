@@ -298,7 +298,7 @@ export const RouteSidebar = (props: RouteSidebarProps) => {
 
       {/* Scrollable main content */}
       <div
-        class={`flex-1 space-y-4 overflow-y-auto px-4 py-3.5 ${
+        class={`app-scroller flex-1 space-y-4 overflow-y-auto px-4 py-3.5 ${
           props.mobileSheetMode === "peek" ? "hidden lg:block" : "block"
         }`}
       >

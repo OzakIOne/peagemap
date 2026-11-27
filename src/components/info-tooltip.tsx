@@ -75,7 +75,7 @@ export const InfoTooltip = (props: InfoTooltipProps) => {
             openTooltip();
           }
         }}
-        class="inline-flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition-[background-color,color] duration-150 hover:bg-slate-800 hover:text-slate-100 focus:bg-slate-800 focus:text-slate-100 focus:outline-none"
+        class="inline-flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition-[background-color,color] duration-150 hover:bg-slate-800 hover:text-slate-100 focus-visible:bg-slate-800 focus-visible:text-slate-100"
       >
         <Info class="h-3.5 w-3.5" />
       </button>

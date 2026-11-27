@@ -1,6 +1,10 @@
 @import "tailwindcss";
 @import "maplibre-gl/dist/maplibre-gl.css";
 
+:root {
+  color-scheme: dark;
+}
+
 @layer base {
   html {
     height: 100%;
@@ -26,6 +30,11 @@
     -webkit-user-select: none;
   }
 
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid #38bdf8;
+    outline-offset: 2px;
+  }
+
   @media (max-width: 767px) {
     input,
     textarea,
@@ -35,22 +44,69 @@
   }
 }
 
+.app-scroller {
+  --scrollbar-thumb: #64748b;
+  --scrollbar-track: #0f172a;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: auto;
+}
+
+@supports not (scrollbar-color: auto) {
+  .app-scroller {
+    scrollbar-width: auto;
+  }
+
+  .app-scroller::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+
+  .app-scroller::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+  }
+
+  .app-scroller::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
 .safe-bottom {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
 
 .popover-enter {
-  animation: popover-in 150ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: top left;
+  animation: popover-fade 150ms ease-out both;
 }
 
-@keyframes popover-in {
+@media (prefers-reduced-motion: no-preference) {
+  .popover-enter {
+    animation:
+      popover-grow 240ms ease-out both,
+      popover-fade 150ms ease-out both;
+    animation:
+      popover-grow 240ms linear(0, 0.45 15%, 1.08 35%, 0.97 55%, 1.01 75%, 1) both,
+      popover-fade 150ms ease-out both;
+  }
+}
+
+@keyframes popover-fade {
   from {
     opacity: 0;
-    transform: translateY(-4px) scale(0.96);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes popover-grow {
+  from {
+    scale: 0.94;
+    translate: 0 -4px;
+  }
+  to {
+    scale: 1;
+    translate: 0 0;
   }
 }
 
